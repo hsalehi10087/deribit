@@ -20,12 +20,21 @@ import numpy as np
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.text import RichText
+from openpyxl.drawing.text import CharacterProperties, Font as DrawingFont, Paragraph, ParagraphProperties
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.marker import Marker
+from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.chart.text import RichText
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.drawing.text import CharacterProperties, Font as DFont, Paragraph, ParagraphProperties
 
 # ------------------------------------------------------------------
 # تنظیمات و آستانه‌ها
@@ -673,6 +682,38 @@ def attach_calls(base, calls, key):
     return out[[key] + [c for c in out.columns if c != key]]
 
 
+def chart_text(size=1200, bold=True, color="262626"):
+    cp = CharacterProperties(sz=size, b=bold, solidFill=color,
+                             latin=DFont(typeface="B Nazanin"), cs=DFont(typeface="B Nazanin"))
+    return RichText(p=[Paragraph(pPr=ParagraphProperties(defRPr=cp), endParaRPr=cp)])
+
+
+def pos_icon_png():
+    """آیکون پایانه فروشگاهی (کارت‌خوان با صفحه نمایش، کیپد و رسید) به‌صورت PNG."""
+    from io import BytesIO
+    from PIL import Image as PILImage, ImageDraw
+    S = 320
+    img = PILImage.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((100, 14, 220, 116), radius=10, fill=(255, 255, 255, 255),
+                        outline=(150, 160, 170, 255), width=4)
+    for y in range(36, 110, 14):
+        d.line((118, y, 202, y), fill=(190, 198, 206, 255), width=5)
+    d.rounded_rectangle((44, 98, 276, 306), radius=34, fill=(38, 52, 68, 255))
+    d.rounded_rectangle((74, 124, 246, 196), radius=12, fill=(120, 214, 200, 255))
+    for x, h in [(96, 30), (126, 48), (156, 22), (186, 58), (216, 38)]:
+        d.rectangle((x, 186 - h, x + 18, 186), fill=(38, 52, 68, 255))
+    d.rounded_rectangle((104, 210, 216, 222), radius=5, fill=(15, 22, 30, 255))
+    for row, y in enumerate([234, 256, 278]):
+        for col, x in enumerate([96, 144, 192]):
+            color = (60, 190, 110, 255) if (row == 2 and col == 2) else (167, 180, 194, 255)
+            d.rounded_rectangle((x, y, x + 36, y + 16), radius=4, fill=color)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 def build_viewer(wb, sheet_name, title, data_df, data_sheet, periods, info_cols, id_col):
     """نمای تک‌مشتری: با انتخاب کد، اطلاعات، پیشنهاد و نمودار مبلغ/معدل همان مشتری نشان داده می‌شود."""
     ds = sheet(wb, data_sheet)
@@ -764,25 +805,85 @@ def build_viewer(wb, sheet_name, title, data_df, data_sheet, periods, info_cols,
     ws.column_dimensions["C"].width = 30
     ws.column_dimensions["D"].width = 20
 
+    def big_text(size, bold=False):
+        cp = CharacterProperties(sz=size * 100, b=bold, latin=DrawingFont(typeface="B Nazanin"))
+        return RichText(p=[Paragraph(pPr=ParagraphProperties(defRPr=cp), endParaRPr=cp)])
+
+    def style(chart, y_title, color):
+        chart.y_axis.title = y_title
+        chart.x_axis.title = "دوره"
+        chart.x_axis.txPr = big_text(13, True)
+        chart.y_axis.txPr = big_text(12)
+        chart.x_axis.delete = False
+        chart.y_axis.delete = False
+        chart.y_axis.number_format = "#,##0"
+        chart.y_axis.majorGridlines = None
+        chart.legend = None
+        chart.height, chart.width = 10, 20
+        chart.dataLabels = DataLabelList()
+        chart.dataLabels.showVal = True
+        chart.dataLabels.showSerName = False
+        chart.dataLabels.showCatName = False
+        chart.dataLabels.showLegendKey = False
+        chart.dataLabels.position = "t"
+        chart.dataLabels.numFmt = "#,##0"
+        chart.dataLabels.txPr = big_text(13, True)
+        return chart
+
+    cats = Reference(ws, min_col=1, min_row=hdr + 1, max_row=last)
+    icon = XLImage(pos_icon_png())
+    icon.width, icon.height = 110, 110
+    ws.add_image(icon, "F1")
+
     bar = BarChart()
     bar.type = "col"
-    bar.title = "مبلغ تراکنش (ستون) و معدل حساب (خط)"
+    bar.gapWidth = 70
+    bar.title = "مبلغ تراکنش و معدل حساب در هر دوره"
     bar.add_data(Reference(ws, min_col=2, min_row=hdr, max_row=last), titles_from_data=True)
     bar.set_categories(Reference(ws, min_col=1, min_row=hdr + 1, max_row=last))
+    bar.series[0].graphicalProperties.solidFill = "2E75B6"
+    bar.series[0].graphicalProperties.line.solidFill = "2E75B6"
+    bar.dataLabels = DataLabelList()
+    bar.dataLabels.showVal = True
+    bar.dataLabels.showSerName = False
+    bar.dataLabels.showCatName = False
+    bar.dataLabels.showLegendKey = False
+    bar.dataLabels.showPercent = False
+    bar.dataLabels.position = "outEnd"
+    bar.dataLabels.txPr = chart_text(1200, True, "1F4E78")
     bar.y_axis.title = "مبلغ تراکنش (میلیون تومان)"
     bar.x_axis.title = "دوره"
+
     line = LineChart()
     line.add_data(Reference(ws, min_col=3, min_row=hdr, max_row=last), titles_from_data=True)
+    ls = line.series[0]
+    ls.graphicalProperties.line.solidFill = "C55A11"
+    ls.graphicalProperties.line.width = 50800
+    ls.marker = Marker(symbol="circle", size=12)
+    ls.marker.graphicalProperties = GraphicalProperties(solidFill="C55A11")
+    ls.marker.graphicalProperties.line.solidFill = "C55A11"
+    ls.smooth = False
+    line.dataLabels = DataLabelList()
+    line.dataLabels.showVal = True
+    line.dataLabels.showSerName = False
+    line.dataLabels.showCatName = False
+    line.dataLabels.showLegendKey = False
+    line.dataLabels.showPercent = False
+    line.dataLabels.position = "t"
+    line.dataLabels.txPr = chart_text(1200, True, "C55A11")
     line.y_axis.axId = 200
     line.y_axis.title = "معدل حساب (میلیون تومان)"
     line.y_axis.crosses = "max"
+
+    for ax in (bar.x_axis, bar.y_axis, line.y_axis):
+        ax.txPr = chart_text(1200, True)
+        ax.delete = False
     bar.x_axis.delete = False
-    bar.y_axis.delete = False
-    line.y_axis.delete = False
+    bar.legend.position = "t"
+    bar.legend.txPr = chart_text(1300, True)
     bar += line
-    bar.height, bar.width = 12, 24
-    bar.legend.position = "b"
-    ws.add_chart(bar, "F3")
+    bar.height, bar.width = 15, 30
+    ws.add_chart(bar, "F7")
     return ws
 
 
