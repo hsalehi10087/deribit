@@ -3,7 +3,7 @@ name: Build Windows EXE
 on:
   workflow_dispatch:
   push:
-    branches: [pos-analysis-exe]
+    branches: [main]
 
 jobs:
   build:
@@ -19,7 +19,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Build exe
-        run: pyinstaller --onefile --name POS_Analysis --collect-all openpyxl run_pos_analysis.py
+        run: pyinstaller --onefile --name POS_Analysis --collect-all openpyxl run_web.py
 
       - uses: actions/upload-artifact@v4
         with:
