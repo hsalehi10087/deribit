@@ -19,7 +19,10 @@ import re
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.chart import LineChart, Reference
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.formatting.rule import FormulaRule
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -52,7 +55,7 @@ FILL = {
     "w3": PatternFill("solid", fgColor="DDEBF7"),
     "saba": PatternFill("solid", fgColor="E2EFDA"),
 }
-THIN = Side(style="thin", color="BFBFBF")
+THIN = Side(style="thin", color="7F7F7F")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 
@@ -405,6 +408,7 @@ def analyse_pos(pos, cfg):
             "معدل آخر (میلیون تومان)": M(pd.Series([bal_last[i]]))[0],
             f"مبلغ {L} (میلیون تومان)": M(pd.Series([amt[L][i]]))[0],
             "وضعیت روند": trend[i],
+            "علت عدم کار (پس از تماس)": "",
         })
     call_df = pd.DataFrame(call_rows)
     if not call_df.empty:
@@ -440,10 +444,16 @@ def analyse_pos(pos, cfg):
         "period_stats": counts,
         "reason_counts": {c: int(reasons[c].sum()) for c in reasons.columns},
     }
+    cust_i = cust.set_index("کد مشتری")
+    grp_cols = ["کد شعبه", "صاحب پایانه", "نام فروشگاه", f"مبلغ {L} (میلیون تومان)",
+                f"معدل {L} (میلیون تومان)", "تغییر مبلغ (%)", "وضعیت روند", "نمره ریسک (۰-۱۰۰)"]
+    groups = {"برتر": cust_i.loc[list(top_idx), grp_cols].reset_index(),
+              "ضعیف": cust_i.loc[list(weak_top), grp_cols].reset_index(),
+              "پتانسیل": cust_i.loc[list(pot_top), grp_cols].reset_index()}
     return {
         "summary": summary, "customers": cust, "churn": churn_df, "saba": saba_df,
         "potential": potential_df, "multi": multi_df, "terminals": term_df,
-        "calls": call_df, "charts": charts,
+        "calls": call_df, "charts": charts, "groups": groups,
     }
 
 
@@ -528,6 +538,7 @@ def analyse_ipg(ipg, cfg):
             "معدل آخر (میلیون تومان)": M(pd.Series([bal_last[i]]))[0],
             f"مبلغ {L} (میلیون تومان)": M(pd.Series([amt[L][i]]))[0],
             "وضعیت روند": trend[i],
+            "علت عدم کار (پس از تماس)": "",
         })
     call_df = pd.DataFrame(call_rows)
     if not call_df.empty:
@@ -554,75 +565,31 @@ def analyse_ipg(ipg, cfg):
             ("فهرست تماس درگاه (کل)", len(call_df)),
         ],
     }
-    return {"summary": summary, "accounts": accounts, "calls": call_df, "charts": charts}
+    acc_i = accounts.set_index("کد حساب")
+    ipg_cols = ["کد شعبه", "دارنده حساب", "نام فروشگاه", f"مبلغ {L} (میلیون تومان)",
+                f"معدل {L} (میلیون تومان)", "تغییر مبلغ (%)", "وضعیت روند"]
+    groups = {"برتر": acc_i.loc[list(top_idx), ipg_cols].reset_index(),
+              "ضعیف": acc_i.loc[list(weak_idx), ipg_cols].reset_index()}
+    return {"summary": summary, "accounts": accounts, "groups": groups, "calls": call_df, "charts": charts}
 
 
 # ------------------------------------------------------------------
-# نوشتن اکسل
+# نوشتن اکسل: جدول‌های خوانا، نمای مشتری، داشبورد
 # ------------------------------------------------------------------
-def fill_cells(ws, first_row, last_row, col_idx, mapping, text_col_fill):
-    """رنگ‌آمیزی سلول‌ها بر اساس متن (مثلاً وضعیت روند یا موج تماس)."""
-    for r in range(first_row, last_row + 1):
-        v = ws.cell(row=r, column=col_idx).value
-        if v in mapping:
-            ws.cell(row=r, column=col_idx).fill = mapping[v]
-
+BODY_FONT = Font(name="Calibri", size=12)
+HEAD_FONT = Font(name="Calibri", size=12, bold=True, color="FFFFFF")
+TITLE_FONT = Font(name="Calibri", size=18, bold=True, color="1F4E78")
+SUB_FONT = Font(name="Calibri", size=14, bold=True, color="1F4E78")
+LABEL_FONT = Font(name="Calibri", size=12, bold=True)
+_table_counter = [0]
 
 TREND_FILL = {
     "ریزش (بدون تراکنش)": FILL["churn"], "افت شدید": FILL["drop"],
     "رو به کاهش": FILL["down"], "رو به رشد": FILL["up"],
     "قهر/ترک احتمالی (معدل قبلی ثبت شده)": FILL["churn"],
     "خروج کامل احتمالی": FILL["drop"],
-    "خرابی دستگاه احتمالی": FILL["w1"],
 }
 WAVE_FILL = {"موج ۱ (فوری)": FILL["w1"], "موج ۲": FILL["w2"], "موج ۳": FILL["w3"]}
-
-
-def write_table(ws, df, start_row=1, title=None, number_fmt=True):
-    """یک جدول را با هدر رنگی، حاشیه، فیلتر و قالب عددی می‌نویسد. برمی‌گرداند ردیف آخر."""
-    r = start_row
-    if title:
-        ws.cell(row=r, column=1, value=title).font = Font(bold=True, size=12, color="1F4E78")
-        r += 1
-    if df.empty:
-        ws.cell(row=r, column=1, value="موردی یافت نشد")
-        return r
-    header_row = r
-    for c_idx, col in enumerate(df.columns, start=1):
-        cell = ws.cell(row=r, column=c_idx, value=str(col))
-        cell.fill, cell.font = FILL["header"], Font(bold=True, color="FFFFFF")
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = BORDER
-    for row in dataframe_to_rows(df, index=False, header=False):
-        r += 1
-        for c_idx, val in enumerate(row, start=1):
-            if isinstance(val, float) and (np.isnan(val) or np.isinf(val)):
-                val = None
-            cell = ws.cell(row=r, column=c_idx, value=val)
-            cell.border = BORDER
-    last = r
-    for c_idx, col in enumerate(df.columns, start=1):
-        letter = get_column_letter(c_idx)
-        width = max(12, min(38, len(str(col)) + 3))
-        if ws.column_dimensions[letter].width is None or ws.column_dimensions[letter].width < width:
-            ws.column_dimensions[letter].width = width
-        fmt = None
-        if "%" in str(col):
-            fmt = "0.0%"
-        elif "میلیون" in str(col):
-            fmt = "#,##0.00"
-        elif any(k in str(col) for k in ["تراکنش", "تعداد", "نمره", "امتیاز", "دوره‌های"]):
-            fmt = "#,##0"
-        if number_fmt and fmt:
-            for rr in range(header_row + 1, last + 1):
-                ws[f"{letter}{rr}"].number_format = fmt
-        if col in ("وضعیت روند", "وضعیت"):
-            fill_cells(ws, header_row + 1, last, c_idx, TREND_FILL, True)
-        if col == "موج تماس":
-            fill_cells(ws, header_row + 1, last, c_idx, WAVE_FILL, True)
-    ws.row_dimensions[header_row].height = 40
-    ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(df.columns))}{last}"
-    return last
 
 
 def new_sheet(wb, name):
@@ -631,47 +598,190 @@ def new_sheet(wb, name):
     return ws
 
 
-def add_group_sheet(wb, name, title, pack, periods):
-    """دو جدول و دو نمودار جداگانه: مبلغ تراکنش و معدل حساب."""
-    ws = new_sheet(wb, name)
+def fill_cells(ws, first_row, last_row, col_idx, mapping):
+    for r in range(first_row, last_row + 1):
+        v = ws.cell(row=r, column=col_idx).value
+        if v in mapping:
+            ws.cell(row=r, column=col_idx).fill = mapping[v]
+
+
+def write_table(ws, df, start_row=1, title=None, as_table=True):
+    """جدول خوانا با هدر رنگی، حاشیه، فونت بزرگ و (در صورت نیاز) جدول اکسل. برمی‌گرداند ردیف آخر."""
+    r = start_row
+    if title:
+        ws.cell(row=r, column=1, value=title).font = SUB_FONT
+        ws.row_dimensions[r].height = 28
+        r += 1
+    if df.empty:
+        ws.cell(row=r, column=1, value="موردی یافت نشد").font = BODY_FONT
+        return r
+    header_row = r
+    for c_idx, col in enumerate(df.columns, start=1):
+        cell = ws.cell(row=r, column=c_idx, value=str(col))
+        cell.font, cell.fill, cell.border = HEAD_FONT, FILL["header"], BORDER
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[header_row].height = 48
+    for row in dataframe_to_rows(df, index=False, header=False):
+        r += 1
+        for c_idx, val in enumerate(row, start=1):
+            if isinstance(val, float) and (np.isnan(val) or np.isinf(val)):
+                val = None
+            cell = ws.cell(row=r, column=c_idx, value=val)
+            cell.font, cell.border = BODY_FONT, BORDER
+            cell.alignment = Alignment(vertical="center")
+        ws.row_dimensions[r].height = 24
+    last = r
+    for c_idx, col in enumerate(df.columns, start=1):
+        letter = get_column_letter(c_idx)
+        want = min(50, max(16, len(str(col)) * 1.4))
+        cur = ws.column_dimensions[letter].width or 0
+        ws.column_dimensions[letter].width = max(cur, want)
+        fmt = None
+        if "%" in str(col):
+            fmt = "0.0%"
+        elif "میلیون" in str(col):
+            fmt = "#,##0.00"
+        elif any(k in str(col) for k in ["تراکنش", "تعداد", "نمره", "امتیاز", "دوره‌های"]):
+            fmt = "#,##0"
+        if fmt:
+            for rr in range(header_row + 1, last + 1):
+                ws[f"{letter}{rr}"].number_format = fmt
+        if col in ("وضعیت روند", "وضعیت"):
+            fill_cells(ws, header_row + 1, last, c_idx, TREND_FILL)
+        if col == "موج تماس":
+            fill_cells(ws, header_row + 1, last, c_idx, WAVE_FILL)
+    if as_table and last > header_row:
+        _table_counter[0] += 1
+        tbl = Table(displayName=f"Tbl{_table_counter[0]}",
+                    ref=f"A{header_row}:{get_column_letter(len(df.columns))}{last}")
+        tbl.tableStyleInfo = TableStyleInfo(name="TableStyleLight9", showRowStripes=True)
+        ws.add_table(tbl)
+    return last
+
+
+def attach_calls(base, calls, key):
+    """ستون‌های تماس (موج، امتیاز، علت، اقدام) را کنار جدول اصلی می‌آورد."""
+    extra = ["موج تماس", "امتیاز اولویت (۰-۱۰۰)", "علت‌های احتمالی", "اقدام پیشنهادی"]
+    if calls.empty:
+        out = base.copy()
+        for c in extra:
+            out[c] = ""
+    else:
+        out = base.merge(calls[[key] + extra], on=key, how="left")
+        for c in extra:
+            out[c] = out[c].fillna("")
+    return out[[key] + [c for c in out.columns if c != key]]
+
+
+def build_viewer(wb, sheet_name, title, data_df, data_sheet, periods, info_cols, id_col):
+    """نمای تک‌مشتری: با انتخاب کد، اطلاعات، پیشنهاد و نمودار مبلغ/معدل همان مشتری نشان داده می‌شود."""
+    ds = new_sheet(wb, data_sheet)
+    write_table(ds, data_df, 1)
+    n = len(data_df)
+    cols = list(data_df.columns)
+
+    def rng(col):
+        L_ = get_column_letter(cols.index(col) + 1)
+        return f"'{data_sheet}'!${L_}$2:${L_}${n + 1}"
+
+    id_rng = rng(id_col)
+    ws = new_sheet(wb, sheet_name)
+    ws.sheet_view.showGridLines = False
     ws["A1"] = title
-    ws["A1"].font = Font(bold=True, size=14, color="1F4E78")
-    n = len(pack["custs"])
-    if n == 0:
-        ws["A3"] = "موردی یافت نشد"
-        return
-    ws.column_dimensions["A"].width = 42
+    ws["A1"].font = TITLE_FONT
+    ws["A3"] = "کد مشتری را از لیست انتخاب کنید ←"
+    ws["A3"].font = LABEL_FONT
+    ws["B3"] = data_df[id_col].iloc[0]
+    ws["B3"].font = Font(name="Calibri", size=16, bold=True, color="1F4E78")
+    ws["B3"].fill = PatternFill("solid", fgColor="FFF2CC")
+    ws["B3"].alignment = Alignment(horizontal="center")
+    thick = Side(style="medium", color="1F4E78")
+    ws["B3"].border = Border(left=thick, right=thick, top=thick, bottom=thick)
+    ws.row_dimensions[3].height = 30
+    dv = DataValidation(type="list", formula1=id_rng, allow_blank=False)
+    dv.error = "کد مشتری را از لیست انتخاب کنید."
+    ws.add_data_validation(dv)
+    dv.add("B3")
 
-    def block(top, label, values, unit):
-        ws.cell(row=top, column=1, value=label).font = Font(bold=True, size=12, color="1F4E78")
-        hdr = top + 1
-        ws.cell(row=hdr, column=1, value="مشتری / فروشگاه").font = Font(bold=True)
-        for j, p in enumerate(periods, start=2):
-            c = ws.cell(row=hdr, column=j, value=p)
-            c.font, c.fill, c.alignment = Font(bold=True, color="FFFFFF"), FILL["header"], Alignment(horizontal="center")
-        for i, (cname, vals) in enumerate(zip(pack["custs"], values), start=hdr + 1):
-            ws.cell(row=i, column=1, value=cname).border = BORDER
-            for j, v in enumerate(vals, start=2):
-                cell = ws.cell(row=i, column=j, value=v)
+    r = 5
+    status_row = None
+    for col in info_cols:
+        lc = ws.cell(row=r, column=1, value=col)
+        lc.font, lc.fill, lc.border = LABEL_FONT, FILL["title"], BORDER
+        ref_v = f'INDEX({rng(col)},MATCH($B$3,{id_rng},0))'
+        vc = ws.cell(row=r, column=2, value=f'=IFERROR(IF({ref_v}="","-",{ref_v}),"-")')
+        vc.font, vc.border = BODY_FONT, BORDER
+        vc.alignment = Alignment(horizontal="right")
+        if "%" in col:
+            vc.number_format = "0.0%"
+        ws.row_dimensions[r].height = 24
+        if col == "وضعیت روند":
+            status_row = r
+        r += 1
+
+    sr = status_row or 5
+    lc = ws.cell(row=r, column=1, value="پیشنهاد هوشمند")
+    lc.font, lc.fill, lc.border = LABEL_FONT, PatternFill("solid", fgColor="E2EFDA"), BORDER
+    vc = ws.cell(row=r, column=2, value=(
+        f'=IF(ISNUMBER(SEARCH("ریزش",B{sr})),"بدون تراکنش؛ تماس برای بازگشت و بررسی علت قطع",'
+        f'IF(ISNUMBER(SEARCH("افت",B{sr})),"کارکرد کاهش یافته؛ تماس برای بررسی علت و معرفی طرح‌ها",'
+        f'IF(ISNUMBER(SEARCH("رو به کاهش",B{sr})),"روند نزولی؛ در دوره بعد پایش شود","وضعیت عادی؛ ادامه پایش")))'))
+    vc.font, vc.fill, vc.border = Font(name="Calibri", size=12, bold=True), PatternFill("solid", fgColor="E2EFDA"), BORDER
+    vc.alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[r].height = 40
+    ws.conditional_formatting.add(f"B{sr}", FormulaRule(formula=[f'ISNUMBER(SEARCH("ریزش",B{sr}))'], fill=FILL["churn"]))
+    ws.conditional_formatting.add(f"B{sr}", FormulaRule(formula=[f'ISNUMBER(SEARCH("افت",B{sr}))'], fill=FILL["drop"]))
+    ws.conditional_formatting.add(f"B{sr}", FormulaRule(formula=[f'ISNUMBER(SEARCH("رو به رشد",B{sr}))'], fill=FILL["up"]))
+
+    r += 3
+    hdr = r
+    heads = ["دوره", "مبلغ تراکنش (میلیون تومان)", "معدل حساب (میلیون تومان)", "تعداد تراکنش"]
+    for j, h in enumerate(heads, start=1):
+        c = ws.cell(row=hdr, column=j, value=h)
+        c.font, c.fill, c.border = HEAD_FONT, FILL["header"], BORDER
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[hdr].height = 40
+    for p in periods:
+        r += 1
+        ws.cell(row=r, column=1, value=p).font = BODY_FONT
+        ws.cell(row=r, column=2, value=f'=IFERROR(INDEX({rng(f"مبلغ {p} (میلیون تومان)")},MATCH($B$3,{id_rng},0)),0)')
+        ws.cell(row=r, column=3, value=f'=IFERROR(INDEX({rng(f"معدل {p} (میلیون تومان)")},MATCH($B$3,{id_rng},0)),0)')
+        ws.cell(row=r, column=4, value=f'=IFERROR(INDEX({rng(f"تراکنش {p}")},MATCH($B$3,{id_rng},0)),0)')
+        for j in range(1, 5):
+            cell = ws.cell(row=r, column=j)
+            cell.border = BORDER
+            cell.font = BODY_FONT
+            if j in (2, 3):
                 cell.number_format = "#,##0.00"
-                cell.border = BORDER
-        chart = LineChart()
-        chart.title = label
-        chart.y_axis.title = unit
-        chart.x_axis.title = "دوره"
-        chart.height, chart.width = 9, 17
-        data = Reference(ws, min_col=1, max_col=1 + len(periods), min_row=hdr + 1, max_row=hdr + n)
-        chart.add_data(data, from_rows=True, titles_from_data=True)
-        chart.set_categories(Reference(ws, min_col=2, max_col=1 + len(periods), min_row=hdr))
-        chart.x_axis.delete = False
-        chart.y_axis.delete = False
-        chart.legend.position = "b"
-        return chart, hdr + n
+            if j == 4:
+                cell.number_format = "#,##0"
+        ws.row_dimensions[r].height = 24
+    last = r
+    ws.column_dimensions["A"].width = 40
+    ws.column_dimensions["B"].width = 42
+    ws.column_dimensions["C"].width = 30
+    ws.column_dimensions["D"].width = 20
 
-    c_amt, end_a = block(3, "مبلغ تراکنش", pack["amt"], "میلیون تومان")
-    c_bal, _ = block(end_a + 3, "معدل حساب", pack["bal"], "میلیون تومان")
-    ws.add_chart(c_amt, "H3")
-    ws.add_chart(c_bal, f"H{end_a + 3}")
+    bar = BarChart()
+    bar.type = "col"
+    bar.title = "مبلغ تراکنش (ستون) و معدل حساب (خط)"
+    bar.add_data(Reference(ws, min_col=2, min_row=hdr, max_row=last), titles_from_data=True)
+    bar.set_categories(Reference(ws, min_col=1, min_row=hdr + 1, max_row=last))
+    bar.y_axis.title = "مبلغ تراکنش (میلیون تومان)"
+    bar.x_axis.title = "دوره"
+    line = LineChart()
+    line.add_data(Reference(ws, min_col=3, min_row=hdr, max_row=last), titles_from_data=True)
+    line.y_axis.axId = 200
+    line.y_axis.title = "معدل حساب (میلیون تومان)"
+    line.y_axis.crosses = "max"
+    bar.x_axis.delete = False
+    bar.y_axis.delete = False
+    line.y_axis.delete = False
+    bar += line
+    bar.height, bar.width = 12, 24
+    bar.legend.position = "b"
+    ws.add_chart(bar, "F3")
+    return ws
 
 
 def add_dashboard(wb, res_pos, res_ipg, cfg):
@@ -757,37 +867,61 @@ def add_dashboard(wb, res_pos, res_ipg, cfg):
     ws.column_dimensions["B"].width = 20
 
 
+def write_groups_sheet(wb, name, title, groups, labels):
+    ws = new_sheet(wb, name)
+    ws["A1"] = title
+    ws["A1"].font = TITLE_FONT
+    r = 3
+    for key, label in labels:
+        r = write_table(ws, groups[key], r, title=label) + 3
+    return ws
+
+
 def write_report(path, res_pos, res_ipg, cfg):
     wb = Workbook()
     wb.remove(wb.active)
     add_dashboard(wb, res_pos, res_ipg, cfg)
 
-    # POS
-    write_table(new_sheet(wb, "فهرست_تماس_POS"), res_pos["calls"], title="فهرست تماس POS (اولویت‌دار)")
-    ws = wb["فهرست_تماس_POS"]
-    ws.freeze_panes = "A3"
+    sp = res_pos["summary"]
+    pos_data = attach_calls(res_pos["customers"], res_pos["calls"], "کد مشتری")
+    pos_info = ["کد شعبه", "صاحب پایانه", "نام فروشگاه", "موبایل", "وضعیت روند", "تغییر مبلغ (%)",
+                "تغییر تراکنش (%)", "آخرین دوره فعال", "نمره ریسک (۰-۱۰۰)", "موج تماس",
+                "امتیاز اولویت (۰-۱۰۰)", "علت‌های احتمالی", "اقدام پیشنهادی"]
+    build_viewer(wb, "نمایش_مشتری_POS", "نمای مشتری - دستگاه‌های POS", pos_data, "داده_POS",
+                 sp["periods"], pos_info, "کد مشتری")
+
+    write_table(new_sheet(wb, "فهرست_تماس_POS"), res_pos["calls"],
+                title="فهرست تماس POS (اولویت‌دار، با کد شعبه)")
+    write_groups_sheet(wb, "برتر_ضعیف_پتانسیل_POS", "مشتریان برتر، ضعیف و دارای پتانسیل (POS)",
+                       res_pos["groups"], [("برتر", "مشتریان برتر POS"),
+                                           ("ضعیف", "مشتریان ضعیف POS"),
+                                           ("پتانسیل", "مشتریان دارای پتانسیل POS")])
     write_table(new_sheet(wb, "روند_POS"), res_pos["customers"], title="روند مشتریان POS")
     write_table(new_sheet(wb, "ریزش_POS"), res_pos["churn"], title="مشتریان ریزش‌کرده POS")
-    write_table(new_sheet(wb, "کاندید_صبا"), res_pos["saba"], title="کاندیدهای وام صبا (معدل بالا + افزایشی + افت مبلغ)")
+    write_table(new_sheet(wb, "کاندید_صبا"), res_pos["saba"],
+                title="کاندیدهای وام صبا (معدل بالا + افزایشی + افت مبلغ)")
     write_table(new_sheet(wb, "پتانسیل_POS"), res_pos["potential"], title="مشتریان دارای پتانسیل POS")
-    write_table(new_sheet(wb, "چند_پوز"), res_pos["multi"], title=f"مشتریان چندپوز و ضعیف‌ترین دستگاه ({res_pos['summary']['D']})")
+    write_table(new_sheet(wb, "چند_پوز"), res_pos["multi"],
+                title=f"مشتریان چندپوز و ضعیف‌ترین دستگاه ({sp['D']})")
     write_table(new_sheet(wb, "وضعیت_پایانه‌ها"), res_pos["terminals"], title="وضعیت ماهانه هر پایانه POS")
-
-    periods_pos = res_pos["summary"]["periods"]
-    add_group_sheet(wb, "نمودار_برتر_POS", "نمودار مشتریان برتر POS", res_pos["charts"]["برتر"], periods_pos)
-    add_group_sheet(wb, "نمودار_ضعیف_POS", "نمودار مشتریان ضعیف POS", res_pos["charts"]["ضعیف"], periods_pos)
-    add_group_sheet(wb, "نمودار_پتانسیل_POS", "نمودار مشتریان دارای پتانسیل POS", res_pos["charts"]["پتانسیل"], periods_pos)
-
-    # IPG
     if res_ipg:
-        write_table(new_sheet(wb, "فهرست_تماس_درگاه"), res_ipg["calls"], title="فهرست تماس درگاه پرداخت (IPG)")
-        write_table(new_sheet(wb, "روند_درگاه"), res_ipg["accounts"], title="روند حساب‌های درگاه پرداخت (IPG)")
-        periods_ipg = res_ipg["summary"]["periods"]
-        add_group_sheet(wb, "نمودار_برتر_درگاه", "نمودار برتر درگاه پرداخت", res_ipg["charts"]["برتر"], periods_ipg)
-        add_group_sheet(wb, "نمودار_ضعیف_درگاه", "نمودار ضعیف درگاه پرداخت", res_ipg["charts"]["ضعیف"], periods_ipg)
+        ip = res_ipg["summary"]["periods"]
+        ipg_data = attach_calls(res_ipg["accounts"], res_ipg["calls"], "کد حساب")
+        ipg_info = ["کد شعبه", "دارنده حساب", "نام فروشگاه", "وضعیت روند", "تغییر مبلغ (%)",
+                    "آخرین دوره فعال", "موج تماس", "امتیاز اولویت (۰-۱۰۰)", "علت‌های احتمالی",
+                    "اقدام پیشنهادی"]
+        build_viewer(wb, "نمایش_حساب_درگاه", "نمای حساب - درگاه‌های پرداخت (IPG)", ipg_data,
+                     "داده_درگاه", ip, ipg_info, "کد حساب")
+        write_table(new_sheet(wb, "فهرست_تماس_درگاه"), res_ipg["calls"],
+                    title="فهرست تماس درگاه پرداخت (IPG، با کد شعبه)")
+        write_groups_sheet(wb, "برتر_ضعیف_درگاه", "مشتریان برتر و ضعیف درگاه (IPG)",
+                           res_ipg["groups"], [("برتر", "حساب‌های برتر درگاه"),
+                                               ("ضعیف", "حساب‌های ضعیف درگاه")])
+        write_table(new_sheet(wb, "روند_درگاه"), res_ipg["accounts"], title="روند حساب‌های درگاه (IPG)")
 
     cfg_df = pd.DataFrame([(k, v) for k, v in cfg.items()], columns=["پارامتر", "مقدار"])
     write_table(new_sheet(wb, "تنظیمات"), cfg_df, title="تنظیمات و آستانه‌ها")
+    wb.calculation.fullCalcOnLoad = True
     wb.save(path)
 
 
