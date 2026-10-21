@@ -1,0 +1,7 @@
+# داده‌های بانکی هرگز وارد ریپازیتوری نشوند
+*.xlsx
+pos_monitoring_report.xlsx
+build/
+dist/
+*.spec
+__pycache__/
