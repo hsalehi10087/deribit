@@ -784,6 +784,36 @@ def build_viewer(wb, sheet_name, title, data_df, data_sheet, periods, info_cols,
     return ws
 
 
+def write_kpi(ws, df, start_row, title):
+    """جدول خلاصه: دو ستون، فونت بزرگ، ردیف‌های بلند و مقدار وسط‌چین."""
+    ws.cell(row=start_row, column=1, value=title).font = SUB_FONT
+    ws.row_dimensions[start_row].height = 30
+    r = start_row + 1
+    for j, h in enumerate(df.columns, start=1):
+        c = ws.cell(row=r, column=j, value=h)
+        c.font, c.fill, c.border = HEAD_FONT, FILL["header"], BORDER
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[r].height = 30
+    for k, (label, val) in enumerate(df.itertuples(index=False), start=1):
+        r += 1
+        band = PatternFill("solid", fgColor="F2F2F2") if k % 2 == 0 else None
+        a = ws.cell(row=r, column=1, value=label)
+        b = ws.cell(row=r, column=2, value=val)
+        a.font = Font(name="Calibri", size=13)
+        b.font = Font(name="Calibri", size=14, bold=True, color="1F4E78")
+        b.alignment = Alignment(horizontal="center", vertical="center")
+        b.number_format = "#,##0"
+        for c in (a, b):
+            c.border = BORDER
+            c.alignment = Alignment(vertical="center", horizontal=c.alignment.horizontal, wrap_text=True)
+            if band:
+                c.fill = band
+        ws.row_dimensions[r].height = 28
+    ws.column_dimensions["A"].width = max(ws.column_dimensions["A"].width or 0, 62)
+    ws.column_dimensions["B"].width = max(ws.column_dimensions["B"].width or 0, 22)
+    return r
+
+
 def add_dashboard(wb, res_pos, res_ipg, cfg):
     ws = new_sheet(wb, "داشبورد")
     ws.sheet_view.zoomScale = 100
@@ -801,10 +831,10 @@ def add_dashboard(wb, res_pos, res_ipg, cfg):
     row += 1
 
     kpi_pos = pd.DataFrame(sp["rows"], columns=["شاخص POS", "مقدار"])
-    row = write_table(ws, kpi_pos, row, title="خلاصه POS (دستگاه‌های پوز)") + 2
+    row = write_kpi(ws, kpi_pos, row, "خلاصه POS (دستگاه‌های پوز)") + 2
     if res_ipg:
         kpi_ipg = pd.DataFrame(res_ipg["summary"]["rows"], columns=["شاخص درگاه", "مقدار"])
-        row = write_table(ws, kpi_ipg, row, title="خلاصه IPG (درگاه‌های پرداخت)") + 2
+        row = write_kpi(ws, kpi_ipg, row, "خلاصه IPG (درگاه‌های پرداخت)") + 2
 
     # جدول شعبه‌ها: گزارش هر شعبه
     cust = res_pos["customers"]
