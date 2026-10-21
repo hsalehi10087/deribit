@@ -576,11 +576,11 @@ def analyse_ipg(ipg, cfg):
 # ------------------------------------------------------------------
 # نوشتن اکسل: جدول‌های خوانا، نمای مشتری، داشبورد
 # ------------------------------------------------------------------
-BODY_FONT = Font(name="Calibri", size=12)
-HEAD_FONT = Font(name="Calibri", size=12, bold=True, color="FFFFFF")
-TITLE_FONT = Font(name="Calibri", size=18, bold=True, color="1F4E78")
-SUB_FONT = Font(name="Calibri", size=14, bold=True, color="1F4E78")
-LABEL_FONT = Font(name="Calibri", size=12, bold=True)
+BODY_FONT = Font(name="B Nazanin", size=13, bold=True)
+HEAD_FONT = Font(name="B Titr", size=13, bold=True, color="FFFFFF")
+TITLE_FONT = Font(name="B Titr", size=22, bold=True, color="1F4E78")
+SUB_FONT = Font(name="B Titr", size=17, bold=True, color="1F4E78")
+LABEL_FONT = Font(name="B Nazanin", size=13, bold=True)
 _table_counter = [0]
 
 TREND_FILL = {
@@ -628,8 +628,8 @@ def write_table(ws, df, start_row=1, title=None, as_table=True):
                 val = None
             cell = ws.cell(row=r, column=c_idx, value=val)
             cell.font, cell.border = BODY_FONT, BORDER
-            cell.alignment = Alignment(vertical="center")
-        ws.row_dimensions[r].height = 24
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[r].height = 26
     last = r
     for c_idx, col in enumerate(df.columns, start=1):
         letter = get_column_letter(c_idx)
@@ -693,9 +693,9 @@ def build_viewer(wb, sheet_name, title, data_df, data_sheet, periods, info_cols,
     ws["A3"] = "کد مشتری را از لیست انتخاب کنید ←"
     ws["A3"].font = LABEL_FONT
     ws["B3"] = data_df[id_col].iloc[0]
-    ws["B3"].font = Font(name="Calibri", size=16, bold=True, color="1F4E78")
+    ws["B3"].font = Font(name="B Nazanin", size=17, bold=True, color="1F4E78")
     ws["B3"].fill = PatternFill("solid", fgColor="FFF2CC")
-    ws["B3"].alignment = Alignment(horizontal="center")
+    ws["B3"].alignment = Alignment(horizontal="center", vertical="center")
     thick = Side(style="medium", color="1F4E78")
     ws["B3"].border = Border(left=thick, right=thick, top=thick, bottom=thick)
     ws.row_dimensions[3].height = 30
@@ -709,10 +709,11 @@ def build_viewer(wb, sheet_name, title, data_df, data_sheet, periods, info_cols,
     for col in info_cols:
         lc = ws.cell(row=r, column=1, value=col)
         lc.font, lc.fill, lc.border = LABEL_FONT, FILL["title"], BORDER
+        lc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         ref_v = f'INDEX({rng(col)},MATCH($B$3,{id_rng},0))'
         vc = ws.cell(row=r, column=2, value=f'=IFERROR(IF({ref_v}="","-",{ref_v}),"-")')
         vc.font, vc.border = BODY_FONT, BORDER
-        vc.alignment = Alignment(horizontal="right")
+        vc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         if "%" in col:
             vc.number_format = "0.0%"
         ws.row_dimensions[r].height = 24
@@ -727,8 +728,8 @@ def build_viewer(wb, sheet_name, title, data_df, data_sheet, periods, info_cols,
         f'=IF(ISNUMBER(SEARCH("ریزش",B{sr})),"بدون تراکنش؛ تماس برای بازگشت و بررسی علت قطع",'
         f'IF(ISNUMBER(SEARCH("افت",B{sr})),"کارکرد کاهش یافته؛ تماس برای بررسی علت و معرفی طرح‌ها",'
         f'IF(ISNUMBER(SEARCH("رو به کاهش",B{sr})),"روند نزولی؛ در دوره بعد پایش شود","وضعیت عادی؛ ادامه پایش")))'))
-    vc.font, vc.fill, vc.border = Font(name="Calibri", size=12, bold=True), PatternFill("solid", fgColor="E2EFDA"), BORDER
-    vc.alignment = Alignment(wrap_text=True, vertical="center")
+    vc.font, vc.fill, vc.border = Font(name="B Nazanin", size=13, bold=True), PatternFill("solid", fgColor="E2EFDA"), BORDER
+    vc.alignment = Alignment(horizontal="center", wrap_text=True, vertical="center")
     ws.row_dimensions[r].height = 40
     ws.conditional_formatting.add(f"B{sr}", FormulaRule(formula=[f'ISNUMBER(SEARCH("ریزش",B{sr}))'], fill=FILL["churn"]))
     ws.conditional_formatting.add(f"B{sr}", FormulaRule(formula=[f'ISNUMBER(SEARCH("افت",B{sr}))'], fill=FILL["drop"]))
@@ -800,13 +801,13 @@ def write_kpi(ws, df, start_row, title):
         band = PatternFill("solid", fgColor="F2F2F2") if k % 2 == 0 else None
         a = ws.cell(row=r, column=1, value=label)
         b = ws.cell(row=r, column=2, value=val)
-        a.font = Font(name="Calibri", size=13)
-        b.font = Font(name="Calibri", size=14, bold=True, color="1F4E78")
+        a.font = Font(name="B Nazanin", size=13, bold=True)
+        b.font = Font(name="B Nazanin", size=14, bold=True, color="1F4E78")
         b.alignment = Alignment(horizontal="center", vertical="center")
         b.number_format = "#,##0"
         for c in (a, b):
             c.border = BORDER
-            c.alignment = Alignment(vertical="center", horizontal=c.alignment.horizontal, wrap_text=True)
+            c.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
             if band:
                 c.fill = band
         ws.row_dimensions[r].height = 28
@@ -917,14 +918,14 @@ NOTES = {
     "داده_درگاه": "داده کامل حساب‌های درگاه که نمای حساب از آن استفاده می‌کند. بهتر است این شیت را تغییر ندهید.",
     "تنظیمات": "آستانه‌ها و تنظیمات اصلی تحلیل، مثلاً حداقل معدل برای صبا، درصد افت و تبدیل ریال به تومان. مبالغ گزارش به میلیون تومان است.",
 }
-NOTE_FONT = Font(name="Calibri", size=12, italic=True, color="404040")
+NOTE_FONT = Font(name="B Titr", size=16, color="404040")
 
 
 def add_note(ws, text):
     c = ws.cell(row=2, column=1, value="راهنما: " + text)
     c.font = NOTE_FONT
-    c.alignment = Alignment(vertical="center")
-    ws.row_dimensions[2].height = 28
+    c.alignment = Alignment(horizontal="right", vertical="center")
+    ws.row_dimensions[2].height = 34
 
 
 def sheet(wb, name):
