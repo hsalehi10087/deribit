@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-پایش و پرستاری پایانه‌های فروش (POS) - تحلیل مشتریان
+پایش و پرستاری پایانه‌های فروش (POS) و درگاه‌های پرداخت (IPG)
+
+- POS فقط با POS و IPG فقط با IPG مقایسه می‌شود.
+- مبلغ تراکنش و معدل هر مشتری در نمودارهای جداگانه نمایش داده می‌شوند.
+- کد شعبه در همه فهرست‌ها آمده تا هر گزارش به شعبه مربوطه داده شود.
 
 ورودی : هر تعداد فایل اکسل ماهانه (POS و/یا IPG)
-خروجی : یک فایل اکسل گزارش (جدول‌ها + نمودار معدل و تراکنش)
+خروجی : فایل اکسل گزارش
 
 اجرا:
     python pos_analysis.py file1.xlsx file2.xlsx ... -o pos_monitoring_report.xlsx
-
-نکته: نوع فایل (POS / IPG) و دوره (مثلاً 1405/06) از عنوان هر فایل خوانده می‌شود.
 """
 import argparse
 import re
@@ -18,41 +20,54 @@ import numpy as np
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, Reference
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 # ------------------------------------------------------------------
-# تنظیمات و آستانه‌ها (هرکدام را بخواهید همین‌جا عوض کنید)
+# تنظیمات و آستانه‌ها
 # ------------------------------------------------------------------
 CONFIG = {
-    "rial_per_toman": 10,                  # داده‌ها ریال فرض شده‌اند؛ هر تومان = ۱۰ ریال
-    "min_avg_balance_toman": 30_000_000,   # حداقل معدل برای طرح وام صبا (۳۰ میلیون تومان)
-    "drop_pct": 0.30,                      # افت کارکرد ≥ ۳۰٪ نسبت به دوره قبل
+    "rial_per_toman": 10,                  # داده‌ها ریال هستند؛ هر تومان = ۱۰ ریال
+    "min_avg_balance_toman": 30_000_000,   # حداقل معدل برای طرح وام صبا
+    "drop_pct": 0.30,                      # افت ≥ ۳۰٪ نسبت به دوره قبل = افت شدید
     "stable_band": 0.10,                   # تغییر بین ±۱۰٪ = ثابت
-    "weak_terminal_ratio": 0.20,           # دستگاهی که کارکردش < ۲۰٪ دستگاه قوی‌تر است، ضعیف
+    "weak_terminal_ratio": 0.20,           # دستگاهی با کارکرد < ۲۰٪ قوی‌ترین، ضعیف
     "top_n": 10,                           # تعداد مشتری در هر نمودار
-    # وزن‌های نمره ریسک (جمع = ۱۰۰)
-    "risk_weight_churn": 40,               # ریزش کامل
-    "risk_weight_decline": 30,             # افت کارکرد
-    "risk_weight_low_volume": 30,          # کارکرد در ۲۵٪ پایین مشتریان فعال
+    "risk_weight_churn": 40,
+    "risk_weight_decline": 30,
+    "risk_weight_low_volume": 30,
 }
 
-PERIOD_LABEL = "{}/{}"
+# رنگ‌های گزارش
+FILL = {
+    "header": PatternFill("solid", fgColor="1F4E78"),
+    "title": PatternFill("solid", fgColor="DDEBF7"),
+    "churn": PatternFill("solid", fgColor="FFC7CE"),
+    "drop": PatternFill("solid", fgColor="F8CBAD"),
+    "down": PatternFill("solid", fgColor="FFF2CC"),
+    "up": PatternFill("solid", fgColor="C6EFCE"),
+    "w1": PatternFill("solid", fgColor="F4B183"),
+    "w2": PatternFill("solid", fgColor="FFE699"),
+    "w3": PatternFill("solid", fgColor="DDEBF7"),
+    "saba": PatternFill("solid", fgColor="E2EFDA"),
+}
+THIN = Side(style="thin", color="BFBFBF")
+BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 
 # ------------------------------------------------------------------
 # خواندن فایل‌ها
 # ------------------------------------------------------------------
 def clean_id(x):
-    """کد مشتری/حساب را به رشته تمیز تبدیل می‌کند (حذف فاصله و اعشار)."""
+    """کد مشتری/حساب/شعبه را به رشته تمیز تبدیل می‌کند."""
     if pd.isna(x):
         return ""
     if isinstance(x, float) and x.is_integer():
         x = int(x)
     out = str(x).strip().replace(" ", "")
     if out.isdigit() and len(out) == 10 and out.startswith("9"):
-        out = "0" + out          # شماره موبایل بدون صفر اول در فایل‌ها ذخیره شده
+        out = "0" + out          # شماره موبایل بدون صفر اول ذخیره شده است
     return out
 
 
@@ -61,7 +76,6 @@ def to_num(s):
 
 
 def find_col(df, name, last=False, prefix=False):
-    """ستون را با نام دقیق (یا پیشوند) پیدا می‌کند. last=True یعنی آخرین تکرار."""
     idx = [i for i, c in enumerate(df.columns)
            if (str(c).startswith(name) if prefix else str(c).strip() == name)]
     if not idx:
@@ -70,15 +84,13 @@ def find_col(df, name, last=False, prefix=False):
 
 
 def read_snapshot(path):
-    """عنوان، نوع فایل (POS/IPG) و دوره را می‌خواند و جدول داده را برمی‌گرداند."""
     raw = pd.read_excel(path, header=None, dtype=object)
     title = str(raw.iloc[0].dropna().iloc[0]).strip()
     m = re.search(r"(\d{6})\s*$", title)
     if not m:
         raise ValueError(f"دوره در عنوان فایل پیدا نشد: {path}")
-    period = PERIOD_LABEL.format(m.group(1)[:4], m.group(1)[4:])
+    period = f"{m.group(1)[:4]}/{m.group(1)[4:]}"
     kind = "POS" if "POS" in title else ("IPG" if "IPG" in title else "?")
-
     is_header = raw.apply(lambda r: r.astype(str).str.strip().eq("نوع تراکنش").any(), axis=1)
     hdr = raw.index[is_header][0]
     df = raw.loc[hdr + 1:].reset_index(drop=True)
@@ -90,6 +102,7 @@ def parse_pos(df, period):
     out = pd.DataFrame({
         "period": period,
         "terminal": to_num(find_col(df, "کد ترمینال", last=True)).astype("int64"),
+        "branch": find_col(df, "کد شعبه").map(clean_id),
         "cust": find_col(df, "شماره تعریف مشتری").map(clean_id),
         "acct": find_col(df, "شماره حساب").map(clean_id),
         "store": find_col(df, "نام فروشگاه").fillna("").astype(str).str.strip(),
@@ -102,12 +115,13 @@ def parse_pos(df, period):
         "amt": to_num(find_col(df, "مبلغ تراکنش ها")),
         "bal": to_num(find_col(df, "میانگین یک ماهه حساب")),
     })
-    return out[~out["cust"].isin(["", "0"])].reset_index(drop=True)  # "0" = کد نامعتبر/بی‌مشتری
+    return out[~out["cust"].isin(["", "0"])].reset_index(drop=True)
 
 
 def parse_ipg(df, period):
     out = pd.DataFrame({
         "period": period,
+        "branch": find_col(df, "کد شعبه").map(clean_id),
         "acct": find_col(df, "شماره حساب").map(clean_id),
         "owner": find_col(df, "نام دارنده حساب").fillna("").astype(str).str.strip(),
         "store": find_col(df, "نام فروشگاه").fillna("").astype(str).str.strip(),
@@ -115,11 +129,11 @@ def parse_ipg(df, period):
         "amt": to_num(find_col(df, "مبلغ تراکنش")),
         "bal": to_num(find_col(df, "میانگین مانده حساب طی ماه", prefix=True)),
     })
-    return out[out["acct"] != ""].reset_index(drop=True)
+    return out[~out["acct"].isin(["", "0"])].reset_index(drop=True)
 
 
 # ------------------------------------------------------------------
-# تحلیل مشتریان POS
+# ابزارهای مشترک
 # ------------------------------------------------------------------
 def trend_label(churn, g, band, drop):
     return np.select(
@@ -129,14 +143,34 @@ def trend_label(churn, g, band, drop):
     )
 
 
+def priority_table(cand_idx, value_m, weights_df, weights, action_map):
+    """امتیاز اولویت و موج تماس: ۶۰٪ ارزش مشتری + ۴۰٪ نوع علت."""
+    rw = pd.Series([max([weights[c] for c in weights_df.columns if weights_df.at[i, c]], default=0)
+                    for i in weights_df.index], index=weights_df.index)
+    cand = rw.index[(rw > 0).values]
+    cand = [i for i in cand if i in cand_idx]
+    if not cand:
+        return cand, pd.Series(dtype=float), rw
+    vpct = value_m.loc[cand].rank(pct=True)
+    score = {i: round(60 * vpct[i] + 40 * rw[i]) for i in cand}
+    return cand, pd.Series(score), rw
+
+
+def wave(score):
+    return "موج ۱ (فوری)" if score >= 70 else ("موج ۲" if score >= 40 else "موج ۳")
+
+
+# ------------------------------------------------------------------
+# تحلیل POS (فقط دستگاه‌های POS)
+# ------------------------------------------------------------------
 def analyse_pos(pos, cfg):
     periods = sorted(pos["period"].unique())
     L, P = periods[-1], periods[-2]
     rial = cfg["rial_per_toman"]
     min_bal_rial = cfg["min_avg_balance_toman"] * rial
     drop, band = cfg["drop_pct"], cfg["stable_band"]
+    M = lambda s: (s / (rial * 1e6)).round(2)
 
-    # ---- تجمیع مشتری × دوره
     cp = pos.groupby(["cust", "period"]).agg(
         terminals=("terminal", "nunique"), cnt=("cnt", "sum"), amt=("amt", "sum")).reset_index()
     bal_cp = (pos.drop_duplicates(["cust", "period", "acct"])
@@ -155,7 +189,7 @@ def analyse_pos(pos, cfg):
     active_L = active[L]
     churn = (~active_L) & active.drop(columns=[L]).any(axis=1)
 
-    # ---- تغییر کارکرد؛ فقط روی پایانه‌های مشترک دو دوره (چون فایل ۱۴۰۵/۰۶ یک پایانه به ازای هر مشتری دارد)
+    # تغییر کارکرد فقط روی پایانه‌های مشترک دو دوره
     tp = pos.groupby(["cust", "terminal", "period"]).agg(cnt=("cnt", "sum"), amt=("amt", "sum")).reset_index()
     a = tp[tp.period == P].set_index(["cust", "terminal"])[["cnt", "amt"]]
     b = tp[tp.period == L].set_index(["cust", "terminal"])[["cnt", "amt"]]
@@ -165,16 +199,13 @@ def analyse_pos(pos, cfg):
 
     g_amt = (amt[L] / amt[P].replace(0, np.nan) - 1)
     g_cnt = (cnt[L] / cnt[P].replace(0, np.nan) - 1)
-    g_amt_c = (cb["amt"] / ca["amt"].replace(0, np.nan) - 1).reindex(amt.index)
-    g_cnt_c = (cb["cnt"] / ca["cnt"].replace(0, np.nan) - 1).reindex(amt.index)
-    g_amt = g_amt_c.combine_first(g_amt)
-    g_cnt = g_cnt_c.combine_first(g_cnt)
+    g_amt = (cb["amt"] / ca["amt"].replace(0, np.nan) - 1).reindex(amt.index).combine_first(g_amt)
+    g_cnt = (cb["cnt"] / ca["cnt"].replace(0, np.nan) - 1).reindex(amt.index).combine_first(g_cnt)
     g_amt[churn] = -1.0
     g_cnt[churn] = -1.0
-
     trend = pd.Series(trend_label(churn, g_amt, band, drop), index=amt.index)
 
-    # ---- معدل (موجودی) و روند آن
+    # معدل و روند آن (آخرین مقدار مثبت ثبت‌شده)
     def bal_info(i):
         vals = [bal.at[i, p] for p in periods if present.at[i, p] and bal.at[i, p] > 0]
         if not vals:
@@ -187,34 +218,55 @@ def analyse_pos(pos, cfg):
     bal_up = pd.Series([x[1] for x in info], index=amt.index)
     bal_first = pd.Series([x[2] for x in info], index=amt.index)
 
-    high_bal = bal_last >= min_bal_rial
-    potential = high_bal & bal_up
-    decline_flag = churn | (g_amt <= -drop).fillna(False)  # کاهش مبلغ کارکرد (نه صرفاً تعداد تراکنش)
+    potential = (bal_last >= min_bal_rial) & bal_up
+    decline_flag = churn | (g_amt <= -drop).fillna(False)
     saba = potential & decline_flag
 
-    # ---- ترمینال‌های ازدست‌رفته (فقط گزارش؛ در نمره ریسک لحاظ نمی‌شود)
-    tP = tp[tp.period == P].set_index(["cust", "terminal"])
-    tL = tp[tp.period == L].set_index(["cust", "terminal"])
-    lost_idx = tP.index.difference(tL.index)
-    lost_count = pd.Series(lost_idx.get_level_values(0)).value_counts().reindex(amt.index, fill_value=0)
+    # پایانه‌های غایب (دوره آخر نیستند)
+    tw = tp.pivot_table(index=["cust", "terminal"], columns="period", values="amt",
+                        aggfunc="sum").reindex(columns=periods)
+    seen = tw.notna()
+    tw_info = pos.sort_values("period").groupby(["cust", "terminal"])[["store", "model", "branch"]].last().reindex(tw.index)
+    term_last_seen = [next((p for p in reversed(periods) if seen.at[k, p]), "") for k in tw.index]
+    term_missing_L = (seen.any(axis=1) & ~seen[L]).values
+    term_df = pd.DataFrame({
+        "کد شعبه": tw_info["branch"].fillna("").values,
+        "کد مشتری": [k[0] for k in tw.index],
+        "کد پایانه": [k[1] for k in tw.index],
+        "نام فروشگاه": tw_info["store"].fillna("").values,
+        "مدل پایانه": tw_info["model"].fillna("").values,
+        "آخرین دوره دیده‌شده": term_last_seen,
+        "وضعیت در آخرین دوره": np.where(seen[L].values, "فعال", "غایب"),
+    })
+    for p in periods:
+        term_df[f"مبلغ {p} (میلیون تومان)"] = M(tw[p].fillna(0)).values
+    term_df = term_df.sort_values(["وضعیت در آخرین دوره", "کد شعبه"]).reset_index(drop=True)
 
-    # ---- نمره ریسک (۰ تا ۱۰۰)
-    active_amt_L = amt[L][active_L]
-    q25 = active_amt_L.quantile(0.25)
+    # نام، شعبه و اطلاعات نمایشی
+    names = pos.sort_values("period").groupby("cust")[["owner", "store", "guild", "mobile", "branch"]].last()
+    names = names.reindex(amt.index).fillna("")
+
+    last_active_s = pd.Series({i: next((p for p in reversed(periods) if active.at[i, p]), "")
+                               for i in amt.index})
+    months_out = pd.Series({i: periods.index(L) - periods.index(last_active_s[i]) if last_active_s[i] else np.nan
+                            for i in amt.index})
+
+    # نمره ریسک
+    q25 = amt[L][active_L].quantile(0.25)
     decl = np.clip(-g_amt.fillna(0), 0, 1)
     risk = (cfg["risk_weight_churn"] * churn.astype(int)
             + cfg["risk_weight_decline"] * decl
             + cfg["risk_weight_low_volume"] * (active_L & (amt[L] <= q25)).astype(int))
     risk = risk.clip(0, 100).round(0)
 
-    # ---- برتر / ضعیف / پتانسیل (برای نمودارها و برچسب‌ها)
+    # برتر / ضعیف / پتانسیل
     top_idx = amt[L][active_L].sort_values(ascending=False).index[: cfg["top_n"]]
     weak_all = churn | trend.isin(["افت شدید"])
     weak_rank = pd.DataFrame({"risk": risk, "amtP": amt[P]})[weak_all]
     weak_top = weak_rank.sort_values(["risk", "amtP"], ascending=False).index[: cfg["top_n"]]
     pot_top = bal_last[potential].sort_values(ascending=False).index[: cfg["top_n"]]
 
-    # ---- دسته‌بندی متنی
+    # برچسب‌ها
     tags = pd.DataFrame(False, index=amt.index, columns=[
         "برتر", "ضعیف", "کاندید صبا", "دارای پتانسیل", "ریزش", "چند پوز"])
     tags.loc[top_idx, "برتر"] = True
@@ -225,15 +277,9 @@ def analyse_pos(pos, cfg):
     tags["چند پوز"] = terms[L] >= 2
     labels = tags.apply(lambda r: "، ".join([c for c in tags.columns if r[c]]), axis=1)
 
-    # ---- اطلاعات نمایشی (آخرین اطلاعات شناخته‌شده مشتری)
-    names = pos.sort_values("period").groupby("cust")[["owner", "store", "guild", "mobile"]].last()
-    names = names.reindex(amt.index).fillna("")
-
-    last_active = pd.Series("", index=amt.index)
-    for p in periods:
-        last_active[active[p]] = p
-
+    # جدول اصلی مشتریان
     cust = pd.DataFrame({
+        "کد شعبه": names["branch"].values,
         "کد مشتری": amt.index,
         "صاحب پایانه": names["owner"].values,
         "نام فروشگاه": names["store"].values,
@@ -243,38 +289,37 @@ def analyse_pos(pos, cfg):
     }, index=amt.index)
     for p in periods:
         cust[f"تراکنش {p}"] = cnt[p].astype(int).values
-        cust[f"مبلغ {p} (میلیون تومان)"] = (amt[p] / (rial * 1e6)).round(2).values
-        cust[f"معدل {p} (میلیون تومان)"] = (bal[p] / (rial * 1e6)).round(2).values
-    cust["تغییر مبلغ (پایانه‌های مشترک، %)"] = g_amt.round(4).values
-    cust["تغییر تراکنش (پایانه‌های مشترک، %)"] = g_cnt.round(4).values
+        cust[f"مبلغ {p} (میلیون تومان)"] = M(amt[p]).values
+        cust[f"معدل {p} (میلیون تومان)"] = M(bal[p]).values
+    cust["تغییر مبلغ (%)"] = g_amt.round(4).values
+    cust["تغییر تراکنش (%)"] = g_cnt.round(4).values
     cust["وضعیت روند"] = trend.values
-    cust["آخرین دوره فعال"] = last_active.values
+    cust["آخرین دوره فعال"] = last_active_s.values
     cust["نمره ریسک (۰-۱۰۰)"] = risk.values
     cust["دسته‌ها"] = labels.values
     cust = cust.sort_values("نمره ریسک (۰-۱۰۰)", ascending=False).reset_index(drop=True)
 
-    # ---- فهرست‌های اختصاصی
-    M = lambda s: (s / (rial * 1e6)).round(2)
+    # فهرست‌های اختصاصی
     churn_df = pd.DataFrame({
+        "کد شعبه": names["branch"][churn].values,
         "کد مشتری": amt.index[churn], "صاحب پایانه": names["owner"][churn].values,
         "نام فروشگاه": names["store"][churn].values, "موبایل": names["mobile"][churn].values,
-        "آخرین دوره فعال": last_active[churn].values,
-        f"تراکنش آخرین دوره ({P or ''})": cnt[P][churn].astype(int).values,
-        f"مبلغ آخرین دوره (میلیون تومان)": M(amt[P][churn]).values,
+        "آخرین دوره فعال": last_active_s[churn].values,
+        f"مبلغ آخرین دوره فعال (میلیون تومان)": M(amt.apply(lambda r: r[[p for p in periods if r[p] > 0][-1]] if (r > 0).any() else 0, axis=1)[churn]).values,
         "معدل آخرین دوره (میلیون تومان)": M(bal_last[churn]).values,
         "نمره ریسک": risk[churn].values,
-    }).sort_values("مبلغ آخرین دوره (میلیون تومان)", ascending=False)
+    }).sort_values("مبلغ آخرین دوره فعال (میلیون تومان)", ascending=False)
 
     def bal_block(mask):
         df = pd.DataFrame({
+            "کد شعبه": names["branch"][mask].values,
             "کد مشتری": amt.index[mask], "صاحب پایانه": names["owner"][mask].values,
             "نام فروشگاه": names["store"][mask].values, "موبایل": names["mobile"][mask].values,
-            f"معدل اول (میلیون تومان)": M(bal_first[mask]).values,
-            f"معدل آخر (میلیون تومان)": M(bal_last[mask]).values,
-            "تغییر مبلغ (%)": g_amt[mask].round(3).values,
-            "تغییر تراکنش (%)": g_cnt[mask].round(3).values,
+            "معدل اول (میلیون تومان)": M(bal_first[mask]).values,
+            "معدل آخر (میلیون تومان)": M(bal_last[mask]).values,
+            "تغییر معدل (%)": (bal_last[mask] / bal_first[mask].replace(0, np.nan) - 1).round(3).values,
             f"مبلغ {L} (میلیون تومان)": M(amt[L][mask]).values,
-            f"تراکنش {L}": cnt[L][mask].astype(int).values,
+            "تغییر مبلغ (%)": g_amt[mask].round(3).values,
             "وضعیت روند": trend[mask].values,
             "تعداد پایانه": terms[L][mask].astype(int).values,
         })
@@ -284,16 +329,15 @@ def analyse_pos(pos, cfg):
     potential_df = bal_block(potential)
     potential_df["کاندید صبا"] = np.where(saba[potential].values, "بله", "خیر")
 
-    # ---- چند پوز: با آخرین دوره‌ای که جزئیات پایانه کامل دارد
+    # چند پوز (آخرین دوره‌ای که جزئیات چند پایانه دارد)
     counts = pos.groupby("period").agg(c=("cust", "nunique"), t=("terminal", "nunique"))
     detail_p = [p for p in periods if counts.at[p, "t"] > counts.at[p, "c"]]
     D = detail_p[-1] if detail_p else L
     Dprev = [p for p in periods if p < D][-1] if any(p < D for p in periods) else None
     td = tp[tp.period == D].copy()
-    td_multi = td.groupby("cust").terminal.transform("nunique") >= 2
-    td = td[td_multi].copy()
+    td = td[td.groupby("cust").terminal.transform("nunique") >= 2].copy()
     td_info = pos[pos.period == D].groupby(["cust", "terminal"]).agg(
-        store=("store", "last"), model=("model", "last"), guild=("guild", "last")).reset_index()
+        store=("store", "last"), model=("model", "last"), branch=("branch", "last")).reset_index()
     td = td.merge(td_info, on=["cust", "terminal"], how="left")
     if Dprev:
         prev = tp[tp.period == Dprev][["cust", "terminal", "amt"]].rename(columns={"amt": "amt_prev"})
@@ -302,80 +346,52 @@ def analyse_pos(pos, cfg):
         td["amt_prev"] = np.nan
     td["max_amt"] = td.groupby("cust").amt.transform("max")
     td["min_amt"] = td.groupby("cust").amt.transform("min")
-    td["نسبت به قوی‌ترین"] = (td.amt / td.max_amt).round(3)
-    td["ضعیف‌ترین"] = (td.amt == td.min_amt) & (td["نسبت به قوی‌ترین"] < cfg["weak_terminal_ratio"])
-    td["تغییر نسبت به دوره قبل"] = np.where(td.amt_prev > 0, td.amt / td.amt_prev - 1, np.nan)
+    td["ratio"] = (td.amt / td.max_amt).round(3)
+    td["weakest"] = (td.amt == td.min_amt) & (td["ratio"] < cfg["weak_terminal_ratio"])
+    td["chg"] = np.where(td.amt_prev > 0, td.amt / td.amt_prev - 1, np.nan)
     td = td.sort_values(["cust", "amt"], ascending=[True, True])
     multi_df = pd.DataFrame({
-        "کد مشتری": td.cust, "کد پایانه": td.terminal, "نام فروشگاه": td.store,
-        "مدل پایانه": td.model, "تراکنش": td.cnt.astype(int),
-        f"مبلغ (میلیون تومان)": M(td.amt), f"مبلغ {Dprev or '-'} (میلیون تومان)": M(td.amt_prev),
-        "تغییر نسبت به دوره قبل (%)": td["تغییر نسبت به دوره قبل"].round(3),
-        "نسبت به قوی‌ترین پایانه": td["نسبت به قوی‌ترین"],
-        "وضعیت": np.where(td["ضعیف‌ترین"], "ضعیف‌ترین دستگاه مشتری", ""),
+        "کد شعبه": td.branch, "کد مشتری": td.cust, "کد پایانه": td.terminal,
+        "نام فروشگاه": td.store, "مدل پایانه": td.model,
+        "تراکنش": td.cnt.astype(int),
+        f"مبلغ {D} (میلیون تومان)": M(td.amt),
+        f"مبلغ {Dprev or '-'} (میلیون تومان)": M(td.amt_prev),
+        "تغییر نسبت به دوره قبل (%)": td.chg.round(3),
+        "نسبت به قوی‌ترین پایانه": td.ratio,
+        "وضعیت": np.where(td.weakest, "ضعیف‌ترین دستگاه مشتری", ""),
     }).reset_index(drop=True)
 
-    # ---- وضعیت ماهانه هر پایانه (غایب / فعال در هر دوره)
-    tw = tp.pivot_table(index=["cust", "terminal"], columns="period", values="amt",
-                        aggfunc="sum").reindex(columns=periods)
-    tw_info = (pos.sort_values("period").groupby(["cust", "terminal"])[["store", "model"]]
-               .last().reindex(tw.index))
-    seen = tw.notna()
-    term_last_seen = [next((p for p in reversed(periods) if seen.at[k, p]), "") for k in tw.index]
-    term_missing_L = (seen.any(axis=1) & ~seen[L]).values
-    term_df = pd.DataFrame({
-        "کد مشتری": [k[0] for k in tw.index],
-        "کد پایانه": [k[1] for k in tw.index],
-        "نام فروشگاه": tw_info["store"].fillna("").values,
-        "مدل پایانه": tw_info["model"].fillna("").values,
-        "آخرین دوره دیده‌شده": term_last_seen,
-        f"وضعیت در {L}": np.where(seen[L].values, "فعال", "غایب"),
-    })
-    for p in periods:
-        term_df[f"مبلغ {p} (میلیون تومان)"] = (tw[p].fillna(0) / (rial * 1e6)).round(2).values
-    term_df = term_df.sort_values(f"وضعیت در {L}").reset_index(drop=True)
-
-    # ---- فهرست تماس اولویت‌دار
+    # فهرست تماس POS
     miss_map = {}
     for k, is_missing in zip(tw.index, term_missing_L):
         if is_missing:
             miss_map.setdefault(k[0], []).append(str(k[1]))
     miss_count = pd.Series({c: len(v) for c, v in miss_map.items()}).reindex(amt.index, fill_value=0)
-
-    months_out = {}
-    for i in amt.index:
-        last = next((p for p in reversed(periods) if active.at[i, p]), None)
-        months_out[i] = periods.index(L) - periods.index(last) if last else np.nan
-    months_out = pd.Series(months_out)
-    last_active_s = pd.Series({i: next((p for p in reversed(periods) if active.at[i, p]), "")
-                               for i in amt.index})
-
     value_m = amt.max(axis=1) / (rial * 1e6)
-    has_bal = bal_last > 0
     reasons = pd.DataFrame({
         "خرابی دستگاه احتمالی": active_L & (miss_count > 0),
-        "قهر/ترک احتمالی": churn & has_bal,
-        "افت کارکرد": active_L & (g_amt <= -drop).fillna(False),
-        "خروج کامل احتمالی": churn & ~has_bal,
+        "قهر/ترک احتمالی (معدل قبلی ثبت شده)": churn & (bal_last > 0),
+        "افت کارکرد ≥۳۰٪": active_L & (g_amt <= -drop).fillna(False),
+        "خروج کامل احتمالی": churn & (bal_last <= 0),
     }, index=amt.index)
-    weights = {"خرابی دستگاه احتمالی": 1.0, "قهر/ترک احتمالی": 0.9,
-               "افت کارکرد": 0.7, "خروج کامل احتمالی": 0.4}
+    weights = {"خرابی دستگاه احتمالی": 1.0, "قهر/ترک احتمالی (معدل قبلی ثبت شده)": 0.9,
+               "افت کارکرد ≥۳۰٪": 0.7, "خروج کامل احتمالی": 0.4}
     action_map = {
-        "خرابی دستگاه احتمالی": "بررسی فنی پایانه‌های غایب (احتمال خرابی) و تماس برای رفع مشکل",
-        "قهر/ترک احتمالی": "تماس برای بازگشت مشتری و رفع نارضایتی (حساب هنوز موجودی دارد)",
-        "افت کارکرد": "تماس برای بررسی علت کاهش کارکرد",
-        "خروج کامل احتمالی": "تماس برای تأیید ترک و بررسی وضعیت حساب",
+        "خرابی دستگاه احتمالی": "بررسی فنی پایانه‌های غایب و تماس برای رفع مشکل",
+        "قهر/ترک احتمالی (معدل قبلی ثبت شده)": "تماس برای بازگشت مشتری و رفع نارضایتی",
+        "افت کارکرد ≥۳۰٪": "تماس برای بررسی علت کاهش کارکرد",
+        "خروج کامل احتمالی": "تماس برای تأیید ترک و وضعیت حساب",
     }
-    rw = pd.Series([max([weights[c] for c in reasons.columns if reasons.at[i, c]], default=0)
-                    for i in amt.index], index=amt.index)
-    cand = rw > 0
-    vpct = value_m[cand].rank(pct=True)
+    cand, scores, rw = priority_table(set(amt.index), value_m, reasons, weights, action_map)
     call_rows = []
-    for i in amt.index[cand.values]:
+    for i in cand:
         rs = [c for c in reasons.columns if reasons.at[i, c]]
         primary = max(rs, key=lambda c: weights[c])
+        sc = int(scores[i])
         call_rows.append({
-            "امتیاز اولویت (۰-۱۰۰)": round(60 * vpct[i] + 40 * rw[i]),
+            "موج تماس": wave(sc),
+            "امتیاز اولویت (۰-۱۰۰)": sc,
+            "کد شعبه": names.at[i, "branch"],
             "اقدام پیشنهادی": action_map[primary],
             "علت‌های احتمالی": "، ".join(rs),
             "کد مشتری": i,
@@ -383,157 +399,267 @@ def analyse_pos(pos, cfg):
             "نام فروشگاه": names.at[i, "store"],
             "موبایل": names.at[i, "mobile"],
             "آخرین دوره فعال": last_active_s[i],
-            "دوره‌های غیرفعال (تعداد)": int(months_out[i]) if not pd.isna(months_out[i]) else "",
+            "دوره‌های غیرفعال": int(months_out[i]) if not pd.isna(months_out[i]) else "",
             "پایانه‌های غایب": "، ".join(miss_map.get(i, [])),
             "حداکثر مبلغ ماهانه (میلیون تومان)": round(value_m[i], 2),
-            "معدل آخر (میلیون تومان)": M(bal_last[i]),
-            f"مبلغ {L} (میلیون تومان)": M(amt[L][i]),
+            "معدل آخر (میلیون تومان)": M(pd.Series([bal_last[i]]))[0],
+            f"مبلغ {L} (میلیون تومان)": M(pd.Series([amt[L][i]]))[0],
             "وضعیت روند": trend[i],
         })
-    call_df = pd.DataFrame(call_rows).sort_values("امتیاز اولویت (۰-۱۰۰)", ascending=False).reset_index(drop=True)
-    call_df.insert(1, "موج تماس", np.where(call_df["امتیاز اولویت (۰-۱۰۰)"] >= 70, "موج ۱ (فوری)",
-                   np.where(call_df["امتیاز اولویت (۰-۱۰۰)"] >= 40, "موج ۲", "موج ۳")))
+    call_df = pd.DataFrame(call_rows)
+    if not call_df.empty:
+        call_df = call_df.sort_values("امتیاز اولویت (۰-۱۰۰)", ascending=False).reset_index(drop=True)
 
-    # ---- نمودارها: برتر، ضعیف، پتانسیل
+    # نمودارها: مبلغ و معدل جداگانه
     def chart_pack(idx):
         return {
             "custs": [f"{names.at[i, 'store'] or names.at[i, 'owner']} ({i})" for i in idx],
+            "amt": [[round(amt.at[i, p] / (rial * 1e6), 2) for p in periods] for i in idx],
             "bal": [[round(bal.at[i, p] / (rial * 1e6), 2) for p in periods] for i in idx],
-            "cnt": [[int(cnt.at[i, p]) for p in periods] for i in idx],
         }
 
     charts = {
-        "مشتریان برتر": chart_pack(top_idx),
-        "مشتریان ضعیف": chart_pack(weak_top),
-        "مشتریان دارای پتانسیل": chart_pack(pot_top),
+        "برتر": chart_pack(top_idx),
+        "ضعیف": chart_pack(weak_top),
+        "پتانسیل": chart_pack(pot_top),
     }
 
     summary = {
-        "periods": periods,
-        "L": L, "P": P, "D": D, "Dprev": Dprev,
+        "periods": periods, "L": L, "P": P, "D": D, "Dprev": Dprev,
         "rows": [
-            ("تعداد کل مشتریان (همه دوره‌ها)", len(amt)),
-            (f"مشتریان دارای تراکنش در {L}", int(active_L.sum())),
-            (f"ریزش (تراکنش قبلی، بدون تراکنش در {L})", int(churn.sum())),
+            ("کل مشتریان POS (همه دوره‌ها)", len(amt)),
+            (f"مشتریان فعال در {L}", int(active_L.sum())),
+            (f"ریزش (فعال قبلی، بدون تراکنش در {L})", int(churn.sum())),
             ("مشتریان ضعیف (ریزش + افت شدید ≥۳۰٪)", int(weak_all.sum())),
             ("کاندید وام صبا", int(saba.sum())),
             ("مشتریان دارای پتانسیل (معدل بالا و افزایشی)", int(potential.sum())),
-            (f"مشتریان با بیش از یک پایانه ({D})", int(len(td.cust.unique()))),
-            (f"دستگاه‌های ضعیف‌تر در مشتریان چندپوز ({D})", int(td["ضعیف‌ترین"].sum())),
-            (f"پایانه‌های قطع‌شده بین {P} و {L} (گزارش، بدون لحاظ در ریسک)", int(len(lost_idx))),
+            (f"مشتریان چندپوز ({D})", int(td.cust.nunique())),
+            (f"دستگاه‌های ضعیف‌تر در چندپوزها ({D})", int(td.weakest.sum())),
+            ("فهرست تماس POS (کل)", len(call_df)),
         ],
         "period_stats": counts,
+        "reason_counts": {c: int(reasons[c].sum()) for c in reasons.columns},
     }
-    summary["rows"] += [
-        ("فهرست تماس اولویت‌دار (تعداد کل)", len(call_df)),
-        ("  ─ خرابی دستگاه احتمالی", int(reasons["خرابی دستگاه احتمالی"].sum())),
-        ("  ─ قهر/ترک احتمالی (حساب موجودی دارد)", int(reasons["قهر/ترک احتمالی"].sum())),
-        ("  ─ افت کارکرد ≥۳۰٪", int(reasons["افت کارکرد"].sum())),
-        ("  ─ خروج کامل احتمالی", int(reasons["خروج کامل احتمالی"].sum())),
-    ]
     return {
         "summary": summary, "customers": cust, "churn": churn_df, "saba": saba_df,
-        "potential": potential_df, "multi": multi_df, "charts": charts,
-        "calls": call_df, "terminals": term_df,
+        "potential": potential_df, "multi": multi_df, "terminals": term_df,
+        "calls": call_df, "charts": charts,
     }
 
 
 # ------------------------------------------------------------------
-# تحلیل درگاه IPG (سطح حساب)
+# تحلیل IPG (فقط درگاه‌های پرداخت)
 # ------------------------------------------------------------------
 def analyse_ipg(ipg, cfg):
     periods = sorted(ipg["period"].unique())
+    L = periods[-1]
+    P = periods[-2] if len(periods) >= 2 else None
     rial = cfg["rial_per_toman"]
+    drop, band = cfg["drop_pct"], cfg["stable_band"]
+    M = lambda s: (s / (rial * 1e6)).round(2)
+
     g = ipg.groupby(["acct", "period"]).agg(cnt=("cnt", "sum"), amt=("amt", "sum"),
                                             bal=("bal", "max")).reset_index()
-    names = ipg.sort_values("period").groupby("acct")[["owner", "store"]].last()
     W = lambda c: g.pivot(index="acct", columns="period", values=c).reindex(columns=periods).fillna(0)
     cnt, amt, bal = W("cnt"), W("amt"), W("bal")
-    out = pd.DataFrame({"کد حساب": amt.index, "دارنده حساب": names["owner"].reindex(amt.index).values,
-                        "نام فروشگاه": names["store"].reindex(amt.index).values}, index=amt.index)
+    names = ipg.sort_values("period").groupby("acct")[["owner", "store", "branch"]].last()
+    names = names.reindex(amt.index).fillna("")
+    active = amt > 0
+    active_L = active[L]
+    churn = (~active_L) & active.drop(columns=[L]).any(axis=1) if P else pd.Series(False, index=amt.index)
+
+    if P:
+        g_amt = amt[L] / amt[P].replace(0, np.nan) - 1
+    else:
+        g_amt = pd.Series(np.nan, index=amt.index)
+    g_amt[churn] = -1.0
+    trend = pd.Series(trend_label(churn, g_amt, band, drop), index=amt.index)
+
+    bal_last = pd.Series([next((bal.at[i, p] for p in reversed(periods) if bal.at[i, p] > 0), 0.0)
+                          for i in amt.index], index=amt.index)
+    last_active_s = pd.Series({i: next((p for p in reversed(periods) if active.at[i, p]), "")
+                               for i in amt.index})
+
+    accounts = pd.DataFrame({
+        "کد شعبه": names["branch"].values,
+        "کد حساب": amt.index,
+        "دارنده حساب": names["owner"].values,
+        "نام فروشگاه": names["store"].values,
+    }, index=amt.index)
     for p in periods:
-        out[f"تراکنش {p}"] = cnt[p].astype(int).values
-        out[f"مبلغ {p} (میلیون تومان)"] = (amt[p] / (rial * 1e6)).round(2).values
-        out[f"معدل {p} (میلیون تومان)"] = (bal[p] / (rial * 1e6)).round(2).values
-    if len(periods) >= 2:
-        P, L = periods[-2], periods[-1]
-        gg = amt[L] / amt[P].replace(0, np.nan) - 1
-        churn = (amt[L] == 0) & (amt[P] > 0)
-        gg[churn] = -1
-        out["وضعیت روند"] = trend_label(churn, gg, cfg["stable_band"], cfg["drop_pct"])
-    return out.sort_values(f"مبلغ {periods[-1]} (میلیون تومان)", ascending=False).reset_index(drop=True)
+        accounts[f"تراکنش {p}"] = cnt[p].astype(int).values
+        accounts[f"مبلغ {p} (میلیون تومان)"] = M(amt[p]).values
+        accounts[f"معدل {p} (میلیون تومان)"] = M(bal[p]).values
+    accounts["تغییر مبلغ (%)"] = g_amt.round(4).values
+    accounts["وضعیت روند"] = trend.values
+    accounts["آخرین دوره فعال"] = last_active_s.values
+    accounts = accounts.sort_values(f"مبلغ {L} (میلیون تومان)", ascending=False).reset_index(drop=True)
+
+    reasons = pd.DataFrame({
+        "قهر/ترک احتمالی (معدل قبلی ثبت شده)": churn & (bal_last > 0),
+        "افت کارکرد ≥۳۰٪": active_L & (g_amt <= -drop).fillna(False),
+        "خروج کامل احتمالی": churn & (bal_last <= 0),
+    }, index=amt.index)
+    weights = {"قهر/ترک احتمالی (معدل قبلی ثبت شده)": 0.9, "افت کارکرد ≥۳۰٪": 0.7,
+               "خروج کامل احتمالی": 0.4}
+    action_map = {
+        "قهر/ترک احتمالی (معدل قبلی ثبت شده)": "تماس با صاحب درگاه برای بازگشت و بررسی علت قطع",
+        "افت کارکرد ≥۳۰٪": "تماس برای بررسی علت کاهش تراکنش‌های درگاه",
+        "خروج کامل احتمالی": "تماس برای تأیید ترک و وضعیت حساب",
+    }
+    value_m = amt.max(axis=1) / (rial * 1e6)
+    cand, scores, rw = priority_table(set(amt.index), value_m, reasons, weights, action_map)
+    call_rows = []
+    for i in cand:
+        rs = [c for c in reasons.columns if reasons.at[i, c]]
+        primary = max(rs, key=lambda c: weights[c])
+        sc = int(scores[i])
+        call_rows.append({
+            "موج تماس": wave(sc),
+            "امتیاز اولویت (۰-۱۰۰)": sc,
+            "کد شعبه": names.at[i, "branch"],
+            "اقدام پیشنهادی": action_map[primary],
+            "علت‌های احتمالی": "، ".join(rs),
+            "کد حساب": i,
+            "دارنده حساب": names.at[i, "owner"],
+            "نام فروشگاه": names.at[i, "store"],
+            "آخرین دوره فعال": last_active_s[i],
+            "حداکثر مبلغ ماهانه (میلیون تومان)": round(value_m[i], 2),
+            "معدل آخر (میلیون تومان)": M(pd.Series([bal_last[i]]))[0],
+            f"مبلغ {L} (میلیون تومان)": M(pd.Series([amt[L][i]]))[0],
+            "وضعیت روند": trend[i],
+        })
+    call_df = pd.DataFrame(call_rows)
+    if not call_df.empty:
+        call_df = call_df.sort_values("امتیاز اولویت (۰-۱۰۰)", ascending=False).reset_index(drop=True)
+
+    def chart_pack(idx):
+        return {
+            "custs": [f"{names.at[i, 'store'] or names.at[i, 'owner']} ({i})" for i in idx],
+            "amt": [[round(amt.at[i, p] / (rial * 1e6), 2) for p in periods] for i in idx],
+            "bal": [[round(bal.at[i, p] / (rial * 1e6), 2) for p in periods] for i in idx],
+        }
+
+    top_idx = amt[L][active_L].sort_values(ascending=False).index[: cfg["top_n"]]
+    weak_idx = list(call_df["کد حساب"][:cfg["top_n"]]) if not call_df.empty else []
+    charts = {"برتر": chart_pack(top_idx), "ضعیف": chart_pack(weak_idx)}
+
+    summary = {
+        "periods": periods,
+        "rows": [
+            ("کل حساب‌های درگاه (همه دوره‌ها)", len(amt)),
+            (f"حساب‌های فعال در {L}", int(active_L.sum())),
+            (f"قطع یا ریزش در {L}", int(churn.sum())),
+            ("حساب‌های با افت کارکرد ≥۳۰٪", int(reasons["افت کارکرد ≥۳۰٪"].sum())),
+            ("فهرست تماس درگاه (کل)", len(call_df)),
+        ],
+    }
+    return {"summary": summary, "accounts": accounts, "calls": call_df, "charts": charts}
 
 
 # ------------------------------------------------------------------
 # نوشتن اکسل
 # ------------------------------------------------------------------
-HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
-HEADER_FONT = Font(bold=True, color="FFFFFF")
+def fill_cells(ws, first_row, last_row, col_idx, mapping, text_col_fill):
+    """رنگ‌آمیزی سلول‌ها بر اساس متن (مثلاً وضعیت روند یا موج تماس)."""
+    for r in range(first_row, last_row + 1):
+        v = ws.cell(row=r, column=col_idx).value
+        if v in mapping:
+            ws.cell(row=r, column=col_idx).fill = mapping[v]
 
 
-def style_sheet(ws, df, start_row=1):
-    ws.sheet_view.rightToLeft = True
-    for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), start=start_row):
+TREND_FILL = {
+    "ریزش (بدون تراکنش)": FILL["churn"], "افت شدید": FILL["drop"],
+    "رو به کاهش": FILL["down"], "رو به رشد": FILL["up"],
+    "قهر/ترک احتمالی (معدل قبلی ثبت شده)": FILL["churn"],
+    "خروج کامل احتمالی": FILL["drop"],
+    "خرابی دستگاه احتمالی": FILL["w1"],
+}
+WAVE_FILL = {"موج ۱ (فوری)": FILL["w1"], "موج ۲": FILL["w2"], "موج ۳": FILL["w3"]}
+
+
+def write_table(ws, df, start_row=1, title=None, number_fmt=True):
+    """یک جدول را با هدر رنگی، حاشیه، فیلتر و قالب عددی می‌نویسد. برمی‌گرداند ردیف آخر."""
+    r = start_row
+    if title:
+        ws.cell(row=r, column=1, value=title).font = Font(bold=True, size=12, color="1F4E78")
+        r += 1
+    if df.empty:
+        ws.cell(row=r, column=1, value="موردی یافت نشد")
+        return r
+    header_row = r
+    for c_idx, col in enumerate(df.columns, start=1):
+        cell = ws.cell(row=r, column=c_idx, value=str(col))
+        cell.fill, cell.font = FILL["header"], Font(bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = BORDER
+    for row in dataframe_to_rows(df, index=False, header=False):
+        r += 1
         for c_idx, val in enumerate(row, start=1):
             if isinstance(val, float) and (np.isnan(val) or np.isinf(val)):
                 val = None
-            ws.cell(row=r_idx, column=c_idx, value=val)
-    hdr = start_row
+            cell = ws.cell(row=r, column=c_idx, value=val)
+            cell.border = BORDER
+    last = r
     for c_idx, col in enumerate(df.columns, start=1):
-        cell = ws.cell(row=hdr, column=c_idx)
-        cell.fill, cell.font = HEADER_FILL, HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         letter = get_column_letter(c_idx)
-        ws.column_dimensions[letter].width = max(14, min(40, len(str(col)) + 4))
+        width = max(12, min(38, len(str(col)) + 3))
+        if ws.column_dimensions[letter].width is None or ws.column_dimensions[letter].width < width:
+            ws.column_dimensions[letter].width = width
         fmt = None
-        if "%" in col:
+        if "%" in str(col):
             fmt = "0.0%"
-        elif "میلیون" in col:
+        elif "میلیون" in str(col):
             fmt = "#,##0.00"
-        elif "تراکنش" in col or "تعداد" in col or "نمره" in col:
+        elif any(k in str(col) for k in ["تراکنش", "تعداد", "نمره", "امتیاز", "دوره‌های"]):
             fmt = "#,##0"
-        if fmt:
-            for r in range(hdr + 1, hdr + 1 + len(df)):
-                ws[f"{letter}{r}"].number_format = fmt
-    ws.freeze_panes = ws.cell(row=hdr + 1, column=2)
-    ws.row_dimensions[hdr].height = 42
+        if number_fmt and fmt:
+            for rr in range(header_row + 1, last + 1):
+                ws[f"{letter}{rr}"].number_format = fmt
+        if col in ("وضعیت روند", "وضعیت"):
+            fill_cells(ws, header_row + 1, last, c_idx, TREND_FILL, True)
+        if col == "موج تماس":
+            fill_cells(ws, header_row + 1, last, c_idx, WAVE_FILL, True)
+    ws.row_dimensions[header_row].height = 40
+    ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(df.columns))}{last}"
+    return last
 
 
-def write_sheet(wb, name, df):
+def new_sheet(wb, name):
     ws = wb.create_sheet(name[:31])
-    if df.empty:
-        ws["A1"] = "موردی یافت نشد"
-        ws.sheet_view.rightToLeft = True
-        return ws
-    style_sheet(ws, df)
+    ws.sheet_view.rightToLeft = True
     return ws
 
 
-def add_group_charts(wb, group_name, pack, periods):
-    ws = wb.create_sheet(group_name[:31])
-    ws.sheet_view.rightToLeft = True
-    ws["A1"] = f"{group_name} - روند معدل حساب و تعداد تراکنش (هر سری = یک مشتری)"
-    ws["A1"].font = Font(bold=True, size=13)
+def add_group_sheet(wb, name, title, pack, periods):
+    """دو جدول و دو نمودار جداگانه: مبلغ تراکنش و معدل حساب."""
+    ws = new_sheet(wb, name)
+    ws["A1"] = title
+    ws["A1"].font = Font(bold=True, size=14, color="1F4E78")
     n = len(pack["custs"])
     if n == 0:
         ws["A3"] = "موردی یافت نشد"
         return
+    ws.column_dimensions["A"].width = 42
 
-    def block(top_row, title, values, unit):
-        ws.cell(row=top_row, column=1, value=title).font = Font(bold=True)
-        hdr = top_row + 1
-        ws.cell(row=hdr, column=1, value="مشتری")
+    def block(top, label, values, unit):
+        ws.cell(row=top, column=1, value=label).font = Font(bold=True, size=12, color="1F4E78")
+        hdr = top + 1
+        ws.cell(row=hdr, column=1, value="مشتری / فروشگاه").font = Font(bold=True)
         for j, p in enumerate(periods, start=2):
-            ws.cell(row=hdr, column=j, value=p)
-        for i, (name, vals) in enumerate(zip(pack["custs"], values), start=hdr + 1):
-            ws.cell(row=i, column=1, value=name)
+            c = ws.cell(row=hdr, column=j, value=p)
+            c.font, c.fill, c.alignment = Font(bold=True, color="FFFFFF"), FILL["header"], Alignment(horizontal="center")
+        for i, (cname, vals) in enumerate(zip(pack["custs"], values), start=hdr + 1):
+            ws.cell(row=i, column=1, value=cname).border = BORDER
             for j, v in enumerate(vals, start=2):
-                ws.cell(row=i, column=j, value=v)
+                cell = ws.cell(row=i, column=j, value=v)
+                cell.number_format = "#,##0.00"
+                cell.border = BORDER
         chart = LineChart()
-        chart.title = f"{title} - {group_name}"
+        chart.title = label
         chart.y_axis.title = unit
         chart.x_axis.title = "دوره"
-        chart.height, chart.width = 9, 18
+        chart.height, chart.width = 9, 17
         data = Reference(ws, min_col=1, max_col=1 + len(periods), min_row=hdr + 1, max_row=hdr + n)
         chart.add_data(data, from_rows=True, titles_from_data=True)
         chart.set_categories(Reference(ws, min_col=2, max_col=1 + len(periods), min_row=hdr))
@@ -542,81 +668,132 @@ def add_group_charts(wb, group_name, pack, periods):
         chart.legend.position = "b"
         return chart, hdr + n
 
-    c1, end1 = block(3, "معدل حساب", pack["bal"], "میلیون تومان")
-    c2, _ = block(end1 + 3, "تعداد تراکنش", pack["cnt"], "تعداد تراکنش")
-    ws.add_chart(c1, "H3")
-    ws.add_chart(c2, "H24")
-    ws.column_dimensions["A"].width = 38
+    c_amt, end_a = block(3, "مبلغ تراکنش", pack["amt"], "میلیون تومان")
+    c_bal, _ = block(end_a + 3, "معدل حساب", pack["bal"], "میلیون تومان")
+    ws.add_chart(c_amt, "H3")
+    ws.add_chart(c_bal, f"H{end_a + 3}")
 
 
-def write_report(path, res, ipg_df, cfg):
-    wb = Workbook()
-    wb.remove(wb.active)
-
-    # خلاصه
-    s = res["summary"]
-    ws = wb.create_sheet("خلاصه")
-    ws.sheet_view.rightToLeft = True
-    ws["A1"] = "گزارش پایش و پرستاری پایانه‌های فروش"
-    ws["A1"].font = Font(bold=True, size=14)
-    ws["A3"] = "دوره‌های بررسی‌شده"
-    ws["B3"] = "، ".join(s["periods"])
-    row = 5
-    for label, val in s["rows"]:
-        ws.cell(row=row, column=1, value=label)
-        ws.cell(row=row, column=2, value=val)
+def add_dashboard(wb, res_pos, res_ipg, cfg):
+    ws = new_sheet(wb, "داشبورد")
+    ws.sheet_view.zoomScale = 100
+    ws["A1"] = "داشبورد پایش و پرستاری پایانه‌ها و درگاه‌ها"
+    ws["A1"].font = Font(bold=True, size=16, color="1F4E78")
+    sp = res_pos["summary"]
+    row = 3
+    ws.cell(row=row, column=1, value="دوره‌های POS").font = Font(bold=True)
+    ws.cell(row=row, column=2, value="، ".join(sp["periods"]))
+    row += 1
+    if res_ipg:
+        ws.cell(row=row, column=1, value="دوره‌های IPG").font = Font(bold=True)
+        ws.cell(row=row, column=2, value="، ".join(res_ipg["summary"]["periods"]))
         row += 1
     row += 1
-    ws.cell(row=row, column=1, value="آمار هر دوره").font = Font(bold=True)
-    row += 1
-    for j, h in enumerate(["دوره", "تعداد مشتری", "تعداد پایانه"], start=1):
-        ws.cell(row=row, column=j, value=h).font = Font(bold=True)
-    row += 1
-    pos_rows = s["period_stats"]
-    for p in s["periods"]:
-        ws.cell(row=row, column=1, value=p)
-        ws.cell(row=row, column=2, value=int(pos_rows.at[p, "c"]))
-        ws.cell(row=row, column=3, value=int(pos_rows.at[p, "t"]))
-        row += 1
-    row += 1
+
+    kpi_pos = pd.DataFrame(sp["rows"], columns=["شاخص POS", "مقدار"])
+    row = write_table(ws, kpi_pos, row, title="خلاصه POS (دستگاه‌های پوز)") + 2
+    if res_ipg:
+        kpi_ipg = pd.DataFrame(res_ipg["summary"]["rows"], columns=["شاخص درگاه", "مقدار"])
+        row = write_table(ws, kpi_ipg, row, title="خلاصه IPG (درگاه‌های پرداخت)") + 2
+
+    # جدول شعبه‌ها: گزارش هر شعبه
+    cust = res_pos["customers"]
+    L = sp["L"]
+    active_col = f"تراکنش {L}"
+    branch_rows = {}
+    for b, grp in cust.groupby("کد شعبه"):
+        branch_rows.setdefault(b, {})
+        branch_rows[b]["مشتریان POS فعال"] = int((grp[active_col] > 0).sum())
+    calls = res_pos["calls"]
+    if not calls.empty:
+        for b, grp in calls.groupby("کد شعبه"):
+            branch_rows.setdefault(b, {})
+            branch_rows[b]["تماس POS - موج ۱"] = int((grp["موج تماس"] == "موج ۱ (فوری)").sum())
+            branch_rows[b]["تماس POS - موج ۲"] = int((grp["موج تماس"] == "موج ۲").sum())
+            branch_rows[b]["تماس POS - موج ۳"] = int((grp["موج تماس"] == "موج ۳").sum())
+    churn = res_pos["churn"]
+    for b, grp in churn.groupby("کد شعبه"):
+        branch_rows.setdefault(b, {})
+        branch_rows[b]["ریزش POS"] = len(grp)
+    saba = res_pos["saba"]
+    for b, grp in saba.groupby("کد شعبه"):
+        branch_rows.setdefault(b, {})
+        branch_rows[b]["کاندید صبا"] = len(grp)
+    if res_ipg and not res_ipg["calls"].empty:
+        for b, grp in res_ipg["calls"].groupby("کد شعبه"):
+            branch_rows.setdefault(b, {})
+            branch_rows[b]["تماس درگاه - موج ۱"] = int((grp["موج تماس"] == "موج ۱ (فوری)").sum())
+            branch_rows[b]["تماس درگاه - موج ۲"] = int((grp["موج تماس"] == "موج ۲").sum())
+            branch_rows[b]["تماس درگاه - موج ۳"] = int((grp["موج تماس"] == "موج ۳").sum())
+
+    bdf = pd.DataFrame.from_dict(branch_rows, orient="index").fillna(0)
+    bdf.index.name = "کد شعبه"
+    bdf = bdf.reset_index()
+    bdf.insert(0, "کد شعبه", bdf.pop("کد شعبه"))
+    for c in bdf.columns[1:]:
+        bdf[c] = bdf[c].astype(int)
+    wcols = [c for c in bdf.columns if c.startswith("تماس POS - موج") or c.startswith("تماس درگاه - موج")]
+    bdf["جمع تماس‌های فوری"] = bdf.get("تماس POS - موج ۱", 0) + bdf.get("تماس درگاه - موج ۱", 0)
+    bdf = bdf.sort_values(["جمع تماس‌های فوری"] + wcols, ascending=False).reset_index(drop=True)
+    row = write_table(ws, bdf, row, title="گزارش هر شعبه (برای ارجاع تماس‌ها)") + 2
+
+    # ۱۵ مورد اول فهرست تماس POS
+    top = calls.head(15)[["موج تماس", "امتیاز اولویت (۰-۱۰۰)", "کد شعبه", "نام فروشگاه", "موبایل",
+                          "علت‌های احتمالی", "اقدام پیشنهادی", "معدل آخر (میلیون تومان)",
+                          f"مبلغ {L} (میلیون تومان)"]] if not calls.empty else calls
+    row = write_table(ws, top, row, title="۱۵ مشتری اولویت‌دار POS") + 2
+    ws.cell(row=row, column=1, value="نکات:").font = Font(bold=True)
     notes = [
-        "نکات مهم کیفیت داده:",
-        f"• فایل {s['L']} فقط یک پایانه برای هر مشتری دارد؛ به همین دلیل مقایسه تغییرات روی «پایانه‌های مشترک» دو دوره انجام شد.",
-        f"• تحلیل چندپوز با دوره {s['D']} انجام شده، چون آخرین دوره‌ای است که جزئیات چند پایانه‌ای دارد.",
-        "• پایانه‌های غایب (در دوره‌های قبل بوده ولی در دوره آخر نیستند) به‌عنوان احتمال خرابی دستگاه در فهرست تماس آمده‌اند؛ اگر فایل آخر دوباره با همه پایانه‌ها صادر شود، بخشی از این موارد حذف می‌شود.",
-        f"• مبالغ داده‌ها ریال فرض شده‌اند و در گزارش به میلیون تومان نمایش داده می‌شوند (هر تومان = {cfg['rial_per_toman']} ریال).",
-        f"• دوره‌ها در فایل‌ها یکسان نیستند ({', '.join(s['periods'])})؛ «ریزش» یعنی نبود تراکنش در دوره آخر نسبت به دوره‌های قبل.",
+        "POS فقط با POS و IPG فقط با IPG مقایسه شده است.",
+        "مبلغ تراکنش و معدل هر مشتری در شیت‌های نمودار به‌صورت جداگانه آمده‌اند.",
+        "پایانه‌های غایب (در دوره‌های قبل بوده ولی در دوره آخر نیستند) به‌عنوان احتمال خرابی دستگاه آمده‌اند.",
+        "اگر فایل آخرین دوره POS دوباره با همه پایانه‌ها صادر شود، فهرست خرابی دستگاه دقیق‌تر می‌شود.",
+        f"مبالغ ریال‌اند و در گزارش به میلیون تومان نمایش داده شده‌اند (هر تومان = {cfg['rial_per_toman']} ریال).",
     ]
     for t in notes:
-        ws.cell(row=row, column=1, value=t)
         row += 1
-    ws.column_dimensions["A"].width = 70
-    ws.column_dimensions["B"].width = 30
+        ws.cell(row=row, column=1, value="• " + t)
+    ws.column_dimensions["A"].width = 16
+    ws.column_dimensions["B"].width = 20
 
-    # جدول‌ها
-    write_sheet(wb, "فهرست_تماس", res["calls"])
-    write_sheet(wb, "روند_مشتریان", res["customers"])
-    write_sheet(wb, "ریزش", res["churn"])
-    write_sheet(wb, "کاندید_صبا", res["saba"])
-    write_sheet(wb, "پتانسیل", res["potential"])
-    write_sheet(wb, "چند_پوز", res["multi"])
-    write_sheet(wb, "وضعیت_پایانه‌ها", res["terminals"])
-    # نمودارها
-    for name, pack in res["charts"].items():
-        add_group_charts(wb, name, pack, s["periods"])
-    if ipg_df is not None and not ipg_df.empty:
-        write_sheet(wb, "درگاه_IPG", ipg_df)
 
-    # تنظیمات
+def write_report(path, res_pos, res_ipg, cfg):
+    wb = Workbook()
+    wb.remove(wb.active)
+    add_dashboard(wb, res_pos, res_ipg, cfg)
+
+    # POS
+    write_table(new_sheet(wb, "فهرست_تماس_POS"), res_pos["calls"], title="فهرست تماس POS (اولویت‌دار)")
+    ws = wb["فهرست_تماس_POS"]
+    ws.freeze_panes = "A3"
+    write_table(new_sheet(wb, "روند_POS"), res_pos["customers"], title="روند مشتریان POS")
+    write_table(new_sheet(wb, "ریزش_POS"), res_pos["churn"], title="مشتریان ریزش‌کرده POS")
+    write_table(new_sheet(wb, "کاندید_صبا"), res_pos["saba"], title="کاندیدهای وام صبا (معدل بالا + افزایشی + افت مبلغ)")
+    write_table(new_sheet(wb, "پتانسیل_POS"), res_pos["potential"], title="مشتریان دارای پتانسیل POS")
+    write_table(new_sheet(wb, "چند_پوز"), res_pos["multi"], title=f"مشتریان چندپوز و ضعیف‌ترین دستگاه ({res_pos['summary']['D']})")
+    write_table(new_sheet(wb, "وضعیت_پایانه‌ها"), res_pos["terminals"], title="وضعیت ماهانه هر پایانه POS")
+
+    periods_pos = res_pos["summary"]["periods"]
+    add_group_sheet(wb, "نمودار_برتر_POS", "نمودار مشتریان برتر POS", res_pos["charts"]["برتر"], periods_pos)
+    add_group_sheet(wb, "نمودار_ضعیف_POS", "نمودار مشتریان ضعیف POS", res_pos["charts"]["ضعیف"], periods_pos)
+    add_group_sheet(wb, "نمودار_پتانسیل_POS", "نمودار مشتریان دارای پتانسیل POS", res_pos["charts"]["پتانسیل"], periods_pos)
+
+    # IPG
+    if res_ipg:
+        write_table(new_sheet(wb, "فهرست_تماس_درگاه"), res_ipg["calls"], title="فهرست تماس درگاه پرداخت (IPG)")
+        write_table(new_sheet(wb, "روند_درگاه"), res_ipg["accounts"], title="روند حساب‌های درگاه پرداخت (IPG)")
+        periods_ipg = res_ipg["summary"]["periods"]
+        add_group_sheet(wb, "نمودار_برتر_درگاه", "نمودار برتر درگاه پرداخت", res_ipg["charts"]["برتر"], periods_ipg)
+        add_group_sheet(wb, "نمودار_ضعیف_درگاه", "نمودار ضعیف درگاه پرداخت", res_ipg["charts"]["ضعیف"], periods_ipg)
+
     cfg_df = pd.DataFrame([(k, v) for k, v in cfg.items()], columns=["پارامتر", "مقدار"])
-    write_sheet(wb, "تنظیمات", cfg_df)
-
+    write_table(new_sheet(wb, "تنظیمات"), cfg_df, title="تنظیمات و آستانه‌ها")
     wb.save(path)
 
 
 # ------------------------------------------------------------------
 def run(files, out):
-    """اجرای کامل تحلیل روی لیست فایل‌ها و نوشتن گزارش در مسیر out."""
+    """اجرای کامل: POS با POS و IPG با IPG."""
     pos_list, ipg_list = [], []
     for f in files:
         kind, period, df = read_snapshot(f)
@@ -630,17 +807,22 @@ def run(files, out):
     if not pos_list:
         raise SystemExit("هیچ فایل POS پیدا نشد.")
     pos = pd.concat(pos_list, ignore_index=True)
-    res = analyse_pos(pos, CONFIG)
-    ipg_df = analyse_ipg(pd.concat(ipg_list, ignore_index=True), CONFIG) if ipg_list else None
-    write_report(out, res, ipg_df, CONFIG)
+    res_pos = analyse_pos(pos, CONFIG)
+    res_ipg = None
+    if ipg_list:
+        res_ipg = analyse_ipg(pd.concat(ipg_list, ignore_index=True), CONFIG)
+    write_report(out, res_pos, res_ipg, CONFIG)
 
     print("گزارش ساخته شد:", out)
-    for label, val in res["summary"]["rows"]:
-        print(f"  {label}: {val}")
+    for label, val in res_pos["summary"]["rows"]:
+        print(f"  POS - {label}: {val}")
+    if res_ipg:
+        for label, val in res_ipg["summary"]["rows"]:
+            print(f"  IPG - {label}: {val}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="تحلیل پایش پایانه‌های فروش")
+    ap = argparse.ArgumentParser(description="تحلیل پایش پایانه‌های فروش و درگاه‌ها")
     ap.add_argument("files", nargs="+", help="فایل‌های اکسل ماهانه (POS و/یا IPG)")
     ap.add_argument("-o", "--out", default="pos_monitoring_report.xlsx")
     args = ap.parse_args()
