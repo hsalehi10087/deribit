@@ -675,17 +675,18 @@ def attach_calls(base, calls, key):
 
 def build_viewer(wb, sheet_name, title, data_df, data_sheet, periods, info_cols, id_col):
     """نمای تک‌مشتری: با انتخاب کد، اطلاعات، پیشنهاد و نمودار مبلغ/معدل همان مشتری نشان داده می‌شود."""
-    ds = new_sheet(wb, data_sheet)
-    write_table(ds, data_df, 1)
+    ds = sheet(wb, data_sheet)
+    HDR = 4
+    write_table(ds, data_df, HDR)
     n = len(data_df)
     cols = list(data_df.columns)
 
     def rng(col):
         L_ = get_column_letter(cols.index(col) + 1)
-        return f"'{data_sheet}'!${L_}$2:${L_}${n + 1}"
+        return f"'{data_sheet}'!${L_}${HDR + 1}:${L_}${HDR + n}"
 
     id_rng = rng(id_col)
-    ws = new_sheet(wb, sheet_name)
+    ws = sheet(wb, sheet_name)
     ws.sheet_view.showGridLines = False
     ws["A1"] = title
     ws["A1"].font = TITLE_FONT
@@ -815,7 +816,7 @@ def write_kpi(ws, df, start_row, title):
 
 
 def add_dashboard(wb, res_pos, res_ipg, cfg):
-    ws = new_sheet(wb, "داشبورد")
+    ws = sheet(wb, "داشبورد")
     ws.sheet_view.zoomScale = 100
     ws["A1"] = "داشبورد پایش و پرستاری پایانه‌ها و درگاه‌ها"
     ws["A1"].font = Font(bold=True, size=16, color="1F4E78")
@@ -897,11 +898,46 @@ def add_dashboard(wb, res_pos, res_ipg, cfg):
     ws.column_dimensions["B"].width = 20
 
 
-def write_groups_sheet(wb, name, title, groups, labels):
+NOTES = {
+    "داشبورد": "این صفحه خلاصه کل گزارش است. جدول «گزارش هر شعبه» نشان می‌دهد هر شعبه چند تماس فوری دارد و هر تماس باید به کدام شعبه ارجاع شود.",
+    "نمایش_مشتری_POS": "کد مشتری را از لیست کشویی سلول زرد انتخاب کنید. اطلاعات، وضعیت، پیشنهاد و نمودار مبلغ و معدل همان مشتری نشان داده می‌شود.",
+    "فهرست_تماس_POS": "مشتریانی که باید تماس بگیرید، بر اساس امتیاز اولویت مرتب شده‌اند. موج ۱ یعنی تماس فوری. ستون «علت عدم کار» را بعد از تماس پر کنید.",
+    "برتر_ضعیف_پتانسیل_POS": "سه فهرست: مشتریان برتر (بیشترین کارکرد)، ضعیف (کارکرد افت کرده یا قطع شده) و پتانسیل (معدل بالا و رو به رشد).",
+    "روند_POS": "وضعیت هر مشتری در هر ماه شامل تعداد تراکنش، مبلغ و معدل. ستون «وضعیت روند» نشان می‌دهد کارکرد رو به رشد، ثابت، کاهشی یا قطع است.",
+    "ریزش_POS": "مشتریانی که قبلاً تراکنش داشتند ولی در ماه آخر تراکنشی ندارند. از بیشترین مبلغ قبلی به کمترین مرتب شده‌اند.",
+    "کاندید_صبا": "مشتریانی با معدل حداقل ۳۰ میلیون تومان که معدلشان رو به افزایش است، ولی کارکرد پایانه‌شان کم شده. برای پیشنهاد وام صبا مناسب‌اند.",
+    "پتانسیل_POS": "مشتریانی با معدل بالا (حداقل ۳۰ میلیون تومان) که رو به رشدند. ستون «کاندید صبا» مشخص می‌کند کدام‌ها برای وام مناسب‌اند.",
+    "چند_پوز": "مشتریانی که بیش از یک دستگاه POS دارند. برای هر دستگاه مبلغ و نسبت به قوی‌ترین دستگاه نشان داده شده. ردیف‌های «ضعیف‌ترین دستگاه» باید بررسی شوند.",
+    "وضعیت_پایانه‌ها": "وضعیت ماهانه هر پایانه. «فعال» یعنی در ماه آخر تراکنش داشته؛ «غایب» یعنی در ماه آخر نیست و احتمال خرابی یا مشکل دارد.",
+    "داده_POS": "داده کامل مشتریان POS که نمای مشتری از آن استفاده می‌کند. بهتر است این شیت را تغییر ندهید.",
+    "فهرست_تماس_درگاه": "فهرست تماس برای درگاه‌های پرداخت (IPG) که جدا از POS تحلیل شده‌اند. ستون «علت عدم کار» را بعد از تماس پر کنید.",
+    "برتر_ضعیف_درگاه": "حساب‌های درگاه با بیشترین مبلغ (برتر) و حساب‌های دارای افت یا قطع (ضعیف).",
+    "روند_درگاه": "روند تراکنش‌ها، مبلغ و معدل هر حساب درگاه در ماه‌های موجود.",
+    "نمایش_حساب_درگاه": "کد حساب درگاه را از لیست کشویی سلول زرد انتخاب کنید تا اطلاعات و نمودار مبلغ و معدل همان حساب نشان داده شود.",
+    "داده_درگاه": "داده کامل حساب‌های درگاه که نمای حساب از آن استفاده می‌کند. بهتر است این شیت را تغییر ندهید.",
+    "تنظیمات": "آستانه‌ها و تنظیمات اصلی تحلیل، مثلاً حداقل معدل برای صبا، درصد افت و تبدیل ریال به تومان. مبالغ گزارش به میلیون تومان است.",
+}
+NOTE_FONT = Font(name="Calibri", size=12, italic=True, color="404040")
+
+
+def add_note(ws, text):
+    c = ws.cell(row=2, column=1, value="راهنما: " + text)
+    c.font = NOTE_FONT
+    c.alignment = Alignment(vertical="center")
+    ws.row_dimensions[2].height = 28
+
+
+def sheet(wb, name):
     ws = new_sheet(wb, name)
+    add_note(ws, NOTES.get(name[:31], ""))
+    return ws
+
+
+def write_groups_sheet(wb, name, title, groups, labels):
+    ws = sheet(wb, name)
     ws["A1"] = title
     ws["A1"].font = TITLE_FONT
-    r = 3
+    r = 4
     for key, label in labels:
         r = write_table(ws, groups[key], r, title=label) + 3
     return ws
@@ -920,20 +956,20 @@ def write_report(path, res_pos, res_ipg, cfg):
     build_viewer(wb, "نمایش_مشتری_POS", "نمای مشتری - دستگاه‌های POS", pos_data, "داده_POS",
                  sp["periods"], pos_info, "کد مشتری")
 
-    write_table(new_sheet(wb, "فهرست_تماس_POS"), res_pos["calls"],
+    write_table(sheet(wb, "فهرست_تماس_POS"), res_pos["calls"], 4,
                 title="فهرست تماس POS (اولویت‌دار، با کد شعبه)")
     write_groups_sheet(wb, "برتر_ضعیف_پتانسیل_POS", "مشتریان برتر، ضعیف و دارای پتانسیل (POS)",
                        res_pos["groups"], [("برتر", "مشتریان برتر POS"),
                                            ("ضعیف", "مشتریان ضعیف POS"),
                                            ("پتانسیل", "مشتریان دارای پتانسیل POS")])
-    write_table(new_sheet(wb, "روند_POS"), res_pos["customers"], title="روند مشتریان POS")
-    write_table(new_sheet(wb, "ریزش_POS"), res_pos["churn"], title="مشتریان ریزش‌کرده POS")
-    write_table(new_sheet(wb, "کاندید_صبا"), res_pos["saba"],
+    write_table(sheet(wb, "روند_POS"), res_pos["customers"], 4, title="روند مشتریان POS")
+    write_table(sheet(wb, "ریزش_POS"), res_pos["churn"], 4, title="مشتریان ریزش‌کرده POS")
+    write_table(sheet(wb, "کاندید_صبا"), res_pos["saba"], 4,
                 title="کاندیدهای وام صبا (معدل بالا + افزایشی + افت مبلغ)")
-    write_table(new_sheet(wb, "پتانسیل_POS"), res_pos["potential"], title="مشتریان دارای پتانسیل POS")
-    write_table(new_sheet(wb, "چند_پوز"), res_pos["multi"],
+    write_table(sheet(wb, "پتانسیل_POS"), res_pos["potential"], 4, title="مشتریان دارای پتانسیل POS")
+    write_table(sheet(wb, "چند_پوز"), res_pos["multi"], 4,
                 title=f"مشتریان چندپوز و ضعیف‌ترین دستگاه ({sp['D']})")
-    write_table(new_sheet(wb, "وضعیت_پایانه‌ها"), res_pos["terminals"], title="وضعیت ماهانه هر پایانه POS")
+    write_table(sheet(wb, "وضعیت_پایانه‌ها"), res_pos["terminals"], 4, title="وضعیت ماهانه هر پایانه POS")
     if res_ipg:
         ip = res_ipg["summary"]["periods"]
         ipg_data = attach_calls(res_ipg["accounts"], res_ipg["calls"], "کد حساب")
@@ -942,15 +978,15 @@ def write_report(path, res_pos, res_ipg, cfg):
                     "اقدام پیشنهادی"]
         build_viewer(wb, "نمایش_حساب_درگاه", "نمای حساب - درگاه‌های پرداخت (IPG)", ipg_data,
                      "داده_درگاه", ip, ipg_info, "کد حساب")
-        write_table(new_sheet(wb, "فهرست_تماس_درگاه"), res_ipg["calls"],
+        write_table(sheet(wb, "فهرست_تماس_درگاه"), res_ipg["calls"], 4,
                     title="فهرست تماس درگاه پرداخت (IPG، با کد شعبه)")
         write_groups_sheet(wb, "برتر_ضعیف_درگاه", "مشتریان برتر و ضعیف درگاه (IPG)",
                            res_ipg["groups"], [("برتر", "حساب‌های برتر درگاه"),
                                                ("ضعیف", "حساب‌های ضعیف درگاه")])
-        write_table(new_sheet(wb, "روند_درگاه"), res_ipg["accounts"], title="روند حساب‌های درگاه (IPG)")
+        write_table(sheet(wb, "روند_درگاه"), res_ipg["accounts"], 4, title="روند حساب‌های درگاه (IPG)")
 
     cfg_df = pd.DataFrame([(k, v) for k, v in cfg.items()], columns=["پارامتر", "مقدار"])
-    write_table(new_sheet(wb, "تنظیمات"), cfg_df, title="تنظیمات و آستانه‌ها")
+    write_table(sheet(wb, "تنظیمات"), cfg_df, 4, title="تنظیمات و آستانه‌ها")
     wb.calculation.fullCalcOnLoad = True
     wb.save(path)
 
